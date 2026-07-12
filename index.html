@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PandaPools — AMM</title>
+    <link rel="stylesheet" href="style.css">
+    <script>try{var t=localStorage.getItem("pp_theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
+</head>
+<body>
+<div class="shell">
+    <header class="hdr">
+        <div class="hdr__logo">
+            <span class="hdr__mark">◈</span>
+            <span class="hdr__title">PandaPools</span>
+            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.1.5</span></span>
+        </div>
+        <div class="hdr__wallet">
+            <span class="hdr__style" onclick="App.cycleTheme()">◐ STYLE</span>
+            <span class="hdr__status">
+                <span id="blockHeight">—</span>
+                <button class="btn btn--ghost btn--sm" onclick="App.rescan(true)">↻</button>
+            </span>
+        </div>
+    </header>
+
+    <nav class="tabs">
+        <button class="tab tab--active" data-view="swap">Swap</button>
+        <button class="tab" data-view="pools">Pools</button>
+        <button class="tab" data-view="mylp">My LP</button>
+        <button class="tab" data-view="wallet">Wallet</button>
+        <button class="tab" data-view="activity">Activity</button>
+    </nav>
+
+    <!-- SWAP -->
+    <section id="view-swap" class="view view--active">
+        <div class="swap-poolline" id="swapPoolLine">Finding pools…</div>
+        <div class="swap-poolline" id="swapHoldings" style="display:none"></div>
+        <div class="swap-poolline" id="swapMarketLine" style="display:none"></div>
+        <div class="swapbox">
+            <div class="swap-leg">
+                <span class="swap-leg__label">You pay</span>
+                <div class="swap-leg__row">
+                    <input id="swapAmount" class="input" type="number" step="any" min="0" placeholder="0.0">
+                    <span class="swap-leg__tok" id="swapFromTok">MINIMA</span>
+                </div>
+                <span class="swap-leg__bal" id="swapFromBal"></span>
+            </div>
+            <div class="swap-flip" id="swapFlip">⇅ flip</div>
+            <div class="swap-leg">
+                <span class="swap-leg__label">You receive</span>
+                <div class="swap-leg__row">
+                    <span class="swap-leg__out" id="swapOut">0.0</span>
+                    <span class="swap-leg__tok" id="swapToTok">token</span>
+                </div>
+                <span class="swap-leg__bal" id="swapToBal"></span>
+            </div>
+            <div class="quote" id="swapQuote"></div>
+            <button id="swapBtn" class="btn btn--primary btn--full" disabled onclick="App.confirmSwap()">SWAP</button>
+            <div id="swapStatus" class="status status--dim"></div>
+        </div>
+        <div id="swapRecent"></div>
+    </section>
+
+    <!-- POOLS -->
+    <section id="view-pools" class="view">
+        <h2 class="view__title">Live pools</h2>
+        <p class="view__desc" id="poolsSummary">Scanning the pool registry…</p>
+        <div id="poolList"></div>
+    </section>
+
+    <!-- MY LP -->
+    <section id="view-mylp" class="view">
+        <div class="card card--accent">
+            <div class="kv"><span class="kv__k">Your liquidity value</span><span class="kv__v" id="lpValue">—</span></div>
+            <div class="kv"><span class="kv__k" id="lpSub">≈ value of both legs</span><span class="kv__v"></span></div>
+        </div>
+        <button class="btn btn--primary btn--full" onclick="App.openCreate()">+ Create a pool</button>
+        <div id="lpStatus" class="status status--dim"></div>
+        <div id="lpList"></div>
+    </section>
+
+    <!-- WALLET -->
+    <section id="view-wallet" class="view">
+        <h2 class="view__title">Wallet</h2>
+        <p class="view__desc">Sendable balances — funds locked in your pools show as LOCKED.</p>
+        <div class="addrbox">
+            <div class="addrbox__label">Receive address</div>
+            <div class="addrbox__addr" id="recvAddr" onclick="App.copyAddr()">…</div>
+            <div class="addrbox__hint">tap to copy</div>
+        </div>
+        <div id="walletList"></div>
+    </section>
+
+    <!-- ACTIVITY -->
+    <section id="view-activity" class="view">
+        <h2 class="view__title">Activity</h2>
+        <div class="chip-row">
+            <span class="chip chip--active" id="actMineChip" onclick="App.setScope(false)">My activity</span>
+            <span class="chip" id="actGlobalChip" onclick="App.setScope(true)">All pools</span>
+        </div>
+        <div id="actList"></div>
+    </section>
+
+    <footer class="footer">
+        <span>PandaPools v0.1.1</span>
+        <span class="footer__sep">|</span>
+        <span>constant-product AMM</span>
+        <span class="footer__sep">|</span>
+        <span>VERIFYOUT covenant · 0.5% fee</span>
+    </footer>
+</div>
+
+<script src="decimal.js"></script>
+<script src="mds.js"></script>
+<script src="covenant.js"></script>
+<script src="curve.js"></script>
+<script src="router.js"></script>
+<script src="book.js"></script>
+<script src="store.js"></script>
+<script src="poolmgr.js"></script>
+<script>
+var PANDAPOOLS_VERSION = "0.1.7";
+
+var App = (function () {
+    var D = Decimal;
+    var CURRENT_BLOCK = 0;
+    var POOLS = [];
+    var MY_KEYS = {};
+    var RECV_ADDR = "";
+    var scanning = false, busy = false, posting = false;
+    var activeView = "swap";
+    var showGlobal = false;
+
+    // swap pair state
+    var pairPools = [], pairLabel = "token", minimaToToken = true;
+    // sendable balances for the current pair (rendered under the swap legs)
+    var swapMinBal = "0", swapTokBal = null, lastBalPairTid = null;
+    // external market price (MEXC MINIMA/USDT) — a read-only arbitrage reference, cached snapshot
+    var MKT_DEPTH = "https://api.mexc.com/api/v3/depth?symbol=MINIMAUSDT&limit=20";
+    var MKT_BOOK = "https://api.mexc.com/api/v3/ticker/bookTicker?symbol=MINIMAUSDT";
+    var MKT_MIN_USDT = 25, MKT_FRESH_MS = 5 * 60000, MKT_GAP_MS = 30000;
+    var mktMid = 0, mktAt = 0, mktFetching = false, mktLastTry = 0;
+    // pending create guard
+    var pendingCreate = null, pendingBlock = 0, pendingLabel = "";
+
+    // ---------------------------------------------------------------- lifecycle
+    MDS.init(function (msg) {
+        if (msg.event === "inited") initApp();
+        if (msg.event === "NEWBLOCK") {
+            CURRENT_BLOCK = parseInt(msg.data && msg.data.txpow && msg.data.txpow.header && msg.data.txpow.header.block) || CURRENT_BLOCK;
+            el("blockHeight").innerText = "#" + CURRENT_BLOCK;
+            PoolMgr.onNewBlock();     // resume any pending signature
+            refreshBalance();
+            refreshMarket();
+            rescan(false);
+        }
+        if (msg.event === "NEWBALANCE") { refreshBalance(); rescan(false); }
+    });
+
+    function initApp() {
+        el("verLabel").innerText = "v" + PANDAPOOLS_VERSION;
+        PoolMgr.setStatusHook(function (m) { setStatus(activeView === "mylp" ? "lpStatus" : "swapStatus", m, "warn"); });
+        setupTabs();
+        el("swapFlip").onclick = function () { minimaToToken = !minimaToToken; syncSwapLabels(); requote(); };
+        el("swapAmount").addEventListener("input", requote);
+        Store.init(function () {
+            MDS.cmd("block", function (r) { if (r.status && r.response) { CURRENT_BLOCK = parseInt(r.response.block) || 0; el("blockHeight").innerText = "#" + CURRENT_BLOCK; } });
+            loadKeys(function () { refreshBalance(); refreshMarket(); loadRecvAddr(); rescan(true); });
+        });
+    }
+
+    function setupTabs() {
+        var tabs = document.querySelectorAll(".tab");
+        tabs.forEach(function (t) {
+            t.onclick = function () {
+                tabs.forEach(function (x) { x.classList.remove("tab--active"); });
+                t.classList.add("tab--active");
+                document.querySelectorAll(".view").forEach(function (v) { v.classList.remove("view--active"); });
+                activeView = t.getAttribute("data-view");
+                el("view-" + activeView).classList.add("view--active");
+                renderActive();
+            };
+        });
+    }
+
+    // ---------------------------------------------------------------- discovery
+    function rescan(force) {
+        if (scanning) return;
+        if (posting && !force) return;
+        scanning = true;
+        Book.scan(function (pools) {
+            scanning = false;
+            POOLS = pools;
+            Store.feedIngest(pools);      // capture the global feed while the page is open too
+            renderActive();
+        });
+    }
+
+    function loadKeys(cb) {
+        MDS.cmd("keys", function (res) {
+            MY_KEYS = {};
+            try {
+                var list = (res && res.status && res.response) ? (res.response.keys || res.response) : [];
+                if (Array.isArray(list)) list.forEach(function (k) {
+                    var pk = (k && (k.publickey || k)) || "";
+                    if (pk && typeof pk === "string") MY_KEYS[pk.toLowerCase()] = true;
+                });
+            } catch (e) {}
+            if (cb) cb();
+        });
+    }
+    function mine(p) { return p.opk && MY_KEYS[p.opk.toLowerCase()] === true; }
+
+    // ---------------------------------------------------------------- render dispatch
+    function renderActive() {
+        if (activeView === "swap") renderSwap();
+        else if (activeView === "pools") renderPools();
+        else if (activeView === "mylp") renderMyLp();
+        else if (activeView === "wallet") renderWallet();
+        else if (activeView === "activity") renderActivity();
+        // keep the swap tab's recent strip fresh regardless of active tab
+        if (activeView !== "swap") renderSwapRecent();
+    }
+
+    // ================================================================ SWAP
+    function renderSwap() {
+        renderSwapRecent();
+        var groups = Router.byToken(POOLS);
+        if (!groups.length) {
+            pairPools = [];
+            el("swapPoolLine").innerText = "No live pools yet — create one in the My LP tab to seed liquidity.";
+            el("swapOut").innerText = "0.0";
+            el("swapQuote").innerHTML = "";
+            el("swapBtn").disabled = true;
+            return;
+        }
+        pairPools = groups[0];
+        pairLabel = PP.tokenLabel(pairPools[0]);
+        if (pairPools[0].tok !== lastBalPairTid) { lastBalPairTid = pairPools[0].tok; refreshBalance(); }   // re-resolve the pair-token (USDT) sendable only when the pair actually changes
+        refreshMarket(); renderSwapMarket();
+        var depth = Router.aggregateDepth(pairPools);
+        var n = pairPools.length;
+        el("swapPoolLine").innerText = "MINIMA / " + pairLabel + "   ·   " + n + (n === 1 ? " pool" : " pools") + "   ·   depth " + trim(depth) + " MINIMA";
+        syncSwapLabels();
+        requote();
+    }
+    function syncSwapLabels() {
+        el("swapFromTok").innerText = minimaToToken ? "MINIMA" : pairLabel;
+        el("swapToTok").innerText = minimaToToken ? pairLabel : "MINIMA";
+        renderSwapBalances();
+    }
+    // Show the sendable balance for each leg (direction-aware), dim under the pay/receive rows.
+    function renderSwapBalances() {
+        var fromEl = el("swapFromBal"), toEl = el("swapToBal"), holdEl = el("swapHoldings");
+        if (!pairPools.length) {
+            if (fromEl) fromEl.innerText = ""; if (toEl) toEl.innerText = "";
+            if (holdEl) { holdEl.innerText = ""; holdEl.style.display = "none"; }
+            return;
+        }
+        var minStr = trim6(swapMinBal || "0");
+        var tokStr = swapTokBal === null ? "0" : trim6(swapTokBal);   // ALWAYS show the token side, even when 0
+        var minTxt = "Balance " + minStr + " MINIMA";
+        var tokTxt = "Balance " + tokStr + " " + pairLabel;
+        if (fromEl) fromEl.innerText = minimaToToken ? minTxt : tokTxt;
+        if (toEl) toEl.innerText = minimaToToken ? tokTxt : minTxt;
+        // an unmissable combined holdings line up top — both balances, always
+        if (holdEl) { holdEl.style.display = ""; holdEl.innerText = "You hold  " + minStr + " MINIMA  ·  " + tokStr + " " + pairLabel; }
+    }
+    function requote() {
+        if (!pairPools.length) return;
+        var inTxt = el("swapAmount").value;
+        var inDec = parseDec(inTxt);
+        var q = el("swapQuote"); q.innerHTML = "";
+        if (!inDec || inDec.lte(0)) { el("swapOut").innerText = "0.0"; el("swapBtn").disabled = true; return; }
+        var r = Router.route(pairPools, minimaToToken, inDec);
+        if (!r.ok) {
+            el("swapOut").innerText = "—";
+            q.innerHTML = kvRow("This trade is too large for the pools' depth.", "", "amber");
+            el("swapBtn").disabled = true;
+            return;
+        }
+        el("swapOut").innerText = trim6(r.totalOut);
+        var html = "";
+        html += kvRow("Rate", "≈ " + trim6(r.effPrice) + " " + pairLabel + " / MINIMA");
+        html += kvRow("Price impact", impact(r) + " %");
+        if (r.poolsAvailable > 1) html += kvRow("Routed across", r.poolsUsed + " of " + r.poolsAvailable + " pools" + (r.capped ? " (top " + Router.MAX_POOLS + ")" : ""));
+        html += kvRow("Pool fee (0.50%)", "kept by LPs");
+        html += kvRow("You receive", "≈ " + trim6(r.totalOut) + " " + (minimaToToken ? pairLabel : "MINIMA"), "green");
+        q.innerHTML = html;
+        el("swapBtn").disabled = posting;
+        el("swapBtn").innerText = posting ? "SWAPPING…" : "SWAP";
+    }
+    function impact(r) {
+        if (!r.spotBefore || r.spotBefore.isZero()) return "0.00";
+        return r.effPrice.minus(r.spotBefore).abs().div(r.spotBefore).times(100).toDP(2, D.ROUND_HALF_UP).toString();
+    }
+    function confirmSwap() {
+        if (!pairPools.length || posting) return;
+        var inDec = parseDec(el("swapAmount").value);
+        if (!inDec || inDec.lte(0)) { setStatus("swapStatus", "Enter an amount first.", "warn"); return; }
+        var dir = minimaToToken;
+        var pin = pairPools.slice();
+        var r = Router.route(pin, dir, inDec);
+        if (!r.ok) { setStatus("swapStatus", "That trade is too large for these pools.", "warn"); return; }
+        var pay = trim6(r.totalIn) + " " + (dir ? "MINIMA" : pairLabel);
+        var recv = trim6(r.totalOut) + " " + (dir ? pairLabel : "MINIMA");
+        var routed = r.poolsUsed > 1 ? "\nRouted across " + r.poolsUsed + " pools in one transaction." : "";
+        openConfirm("Confirm swap",
+            "Pay  " + pay + "\nReceive  " + recv +
+            "\nRate  ≈ " + trim6(r.effPrice) + " " + pairLabel + " / MINIMA" +
+            "\n\nPrice impact " + impact(r) + "%." + routed +
+            "\n\nThis posts a real on-chain transaction — if a pool moves before it confirms the swap is rejected (you keep your funds).",
+            "Swap", function () { doSwap(r, dir); });
+    }
+    function doSwap(r, dir) {
+        posting = true; busy = true;
+        el("swapBtn").disabled = true; el("swapBtn").innerText = "SWAPPING…";
+        setStatus("swapStatus", "Building + posting your swap…", "dim");
+        var fromT = dir ? "MINIMA" : pairLabel, toT = dir ? pairLabel : "MINIMA";
+        var summary = "−" + trim6(r.totalIn) + " " + fromT + "  ·  +" + trim6(r.totalOut) + " " + toT
+                    + "  ·  " + trim6(r.effPrice) + " " + pairLabel + "/MINIMA";
+        PoolMgr.swap(r, dir, {
+            ok: function (txpowid) {
+                Store.actRecord("SWAP", summary, txpowid, CURRENT_BLOCK);
+                posting = false; busy = false;
+                el("swapAmount").value = "";
+                setStatus("swapStatus", "Swap posted ✓  " + PP.shorten(txpowid) + " — reserves update in ~1–2 blocks.", "ok");
+                el("swapBtn").disabled = false; el("swapBtn").innerText = "SWAP";
+                rescan(true);
+            },
+            fail: function (m) {
+                Store.actRecordFailed("SWAP", summary, m);
+                posting = false; busy = false;
+                setStatus("swapStatus", "Swap failed: " + m, "err");
+                el("swapBtn").disabled = false; el("swapBtn").innerText = "SWAP";
+            }
+        });
+    }
+    function renderSwapRecent() {
+        Store.actList(3, function (entries) {
+            var host = el("swapRecent");
+            if (!entries.length) { host.innerHTML = ""; return; }
+            var html = '<div class="recent"><div class="recent__head">Recent activity</div>';
+            entries.forEach(function (e) {
+                var cls = e.failed ? "err" : Store.confirmed(e, CURRENT_BLOCK) ? "ok" : "warn";
+                html += '<div class="recent__row"><span>' + esc(e.summary) + '</span><span class="statuschip statuschip--' + cls + '">' + esc(Store.statusText(e, CURRENT_BLOCK)) + '</span></div>';
+            });
+            html += '<span class="recent__link" onclick="App.gotoActivity()">See all → Activity</span></div>';
+            host.innerHTML = html;
+        });
+    }
+
+    // ================================================================ POOLS
+    function renderPools() {
+        var host = el("poolList");
+        if (!POOLS.length) {
+            el("poolsSummary").innerText = "No live pools found in the registry yet. Create one to seed liquidity.";
+            host.innerHTML = "";
+            return;
+        }
+        var agg = Curve.totalMinima(POOLS);
+        el("poolsSummary").innerText = POOLS.length + (POOLS.length === 1 ? " pool" : " pools") + " · " + trim(agg) + " MINIMA aggregate depth";
+        var html = "";
+        POOLS.forEach(function (p) {
+            var tl = PP.tokenLabel(p);
+            var fg = Curve.feeGrowth(p).times(100);
+            html += '<div class="card"><div class="card__title">MINIMA / ' + esc(tl) + '</div>' +
+                kvRow("reserves", trim(p.reserveM) + " MINIMA · " + trim(p.reserveT) + " " + esc(tl)) +
+                kvRow("spot price", trim8(Curve.spotPrice(p)) + " " + esc(tl) + " / MINIMA") +
+                kvRow("fees accrued (K/KMIN−1)", trim8(fg) + " %") +
+                kvRow("pool", esc(p.address.substring(0, 18)) + "…") + '</div>';
+        });
+        host.innerHTML = html;
+    }
+
+    // ================================================================ MY LP
+    function renderMyLp() {
+        var owned = POOLS.filter(mine);
+
+        // pending-create resolution
+        if (pendingCreate) {
+            var live = owned.some(function (p) { return p.address && p.address.toLowerCase() === pendingCreate.address.toLowerCase(); });
+            if (live) { setStatus("lpStatus", "Pool live ✓  MINIMA / " + pendingLabel + " is now earning fees.", "ok"); pendingCreate = null; }
+            else if (CURRENT_BLOCK > 0 && CURRENT_BLOCK - pendingBlock > 20) {
+                pendingCreate = null;
+                setStatus("lpStatus", "Your pool hasn't appeared after ~20 blocks — it may just be slow. Check the Activity tab; you can create again if needed.", "warn");
+            }
+        }
+
+        withSnapshots(owned, function () {
+            var host = el("lpList");
+            var html = "";
+            if (pendingCreate) html += confirmingCard();
+            if (!owned.length) {
+                el("lpValue").innerText = pendingCreate ? "Confirming…" : "No pools yet";
+                el("lpSub").innerText = pendingCreate ? "Your new pool is being written on-chain." :
+                    (Object.keys(MY_KEYS).length ? "Create a pool to start earning the swap fee." : "Pair the node to see your liquidity.");
+                host.innerHTML = html;
+                return;
+            }
+            var totalM = new D(0);
+            owned.forEach(function (p) { totalM = totalM.plus(PP.dec(p.reserveM)); });
+            el("lpValue").innerText = trim(totalM.times(2)) + " MINIMA";
+            el("lpSub").innerText = owned.length + (owned.length === 1 ? " pool" : " pools") + "  ·  ≈ value of both legs";
+            owned.forEach(function (p) { html += lpCard(p); });
+            host.innerHTML = html;
+        });
+    }
+
+    function withSnapshots(pools, cb) {
+        var pending = pools.length;
+        if (!pending) { cb(); return; }
+        pools.forEach(function (p) { Store.lpGet(p.address, function (s) { p.snap = s; if (--pending === 0) cb(); }); });
+    }
+
+    function confirmingCard() {
+        var el2 = Math.max(0, CURRENT_BLOCK - pendingBlock);
+        var st = el2 <= 3 ? ("Writing on-chain — block " + el2 + " of ~3") : ("Writing on-chain — " + el2 + " blocks (taking a little longer than usual)");
+        var seed = "";
+        if (pendingCreate.reserveM && pendingCreate.reserveT) seed = kvRow("Seeding", trim(pendingCreate.reserveM) + " MINIMA + " + trim(pendingCreate.reserveT) + " " + esc(pendingLabel));
+        return '<div class="card card--amber" onclick="App.dismissPending()"><div class="card__title" style="color:var(--amber)">MINIMA / ' + esc(pendingLabel) + '  ·  confirming…</div>' +
+            kvRow("Status", st) + seed + kvRow("", "It will appear here automatically — no need to resubmit. (Tap to dismiss.)") + '</div>';
+    }
+    function dismissPending() { pendingCreate = null; setStatus("lpStatus", "", "dim"); renderMyLp(); }
+
+    function lpCard(p) {
+        var tl = PP.tokenLabel(p);
+        var value = PP.dec(p.reserveM).times(2);
+        var snap = p.snap;
+        // fees earned (double math, as native): LP value ∝ √K at constant price
+        var feeBase = (snap && snap.feeBaseK.gt(0)) ? snap.feeBaseK : PP.decOr(p.kmin, 0);
+        var growth = 0;
+        if (feeBase.gt(0)) growth = Math.max(0, num(Curve.k(p).div(feeBase)) - 1);
+        var feeMult = Math.sqrt(1 + growth);
+        var feesMinima = num(value) * (1 - 1 / feeMult);
+
+        var html = '<div class="card"><div class="card__title">MINIMA / ' + esc(tl) + '</div>';
+        html += kvRow("Your liquidity", trim(p.reserveM) + " MINIMA + " + trim(p.reserveT) + " " + esc(tl));
+        html += kvRow("Value now", "≈ " + trim(value) + " MINIMA");
+        html += kvRow("Pool price", trim8(Curve.spotPrice(p)) + " " + esc(tl) + " / MINIMA");
+        html += kvRow("Fees earned", "≈ " + fmt(feesMinima) + " MINIMA  (+" + fmt(growth * 100) + "%)", "green");
+
+        if (snap && snap.initPrice.gt(0) && Curve.spotPrice(p).gt(0)) {
+            var p0 = num(snap.initPrice), pnow = num(Curve.spotPrice(p));
+            var ratio = pnow / p0;
+            var priceMove = (ratio - 1) * 100;
+            var il = (2 * Math.sqrt(ratio) / (1 + ratio) - 1) * 100;
+            html += kvRow("Price since open", (priceMove >= 0 ? "+" : "") + fmt(priceMove) + "%");
+            html += kvRow("Impermanent loss", fmt(il) + "% vs holding", il < -0.01 ? "amber" : "");
+            var age = CURRENT_BLOCK - snap.block;
+            if (age > 0) html += kvRow("Age", age + " blocks (~" + fmt(age * 50 / 3600) + " h)");
+        }
+
+        // KMIN health
+        var kmin = PP.decOr(p.kmin, 0);
+        var kratio = kmin.gt(0) ? Curve.k(p).div(kmin) : new D(1);
+        html += healthBar(kratio);
+        html += actionRow(p, kratio);
+        html += '</div>';
+        return html;
+    }
+    function healthBar(ratio) {
+        var frac = Math.max(0, Math.min(1, num(ratio) - 1));
+        var warn = frac >= 0.85;
+        return '<div class="health"><div class="health__row"><span>Floor headroom</span><span style="color:' + (warn ? "var(--amber)" : "var(--dim)") + '">' + (warn ? "migrate soon" : "healthy") + '</span></div>' +
+            '<div class="health__track"><div class="health__fill' + (warn ? " health__fill--warn" : "") + '" style="width:' + Math.max(2, frac * 100) + '%"></div></div></div>';
+    }
+    function actionRow(p, ratio) {
+        var mustMigrate = num(ratio) >= 1.85;
+        var id = p.address;
+        return '<div class="actions">' +
+            btn(mustMigrate ? "Add (full)" : "Add", "App.openAdd('" + id + "')", false) +
+            btn("Migrate", "App.openMigrate('" + id + "')", mustMigrate) +
+            btn("Close", "App.confirmClose('" + id + "')", false) + '</div>';
+    }
+    function btn(label, onclick, primary) { return '<button class="btn ' + (primary ? "btn--primary" : "btn--outline") + '" onclick="' + onclick + '">' + label + '</button>'; }
+    function poolByAddr(a) { for (var i = 0; i < POOLS.length; i++) if (POOLS[i].address === a) return POOLS[i]; return null; }
+
+    // ---- create ----
+    function openCreate() {
+        if (pendingCreate) {
+            var el2 = Math.max(0, CURRENT_BLOCK - pendingBlock);
+            setStatus("lpStatus", "Your MINIMA / " + pendingLabel + " pool is still confirming (block " + Math.min(el2, 3) + " of ~3) — wait before creating another.", "warn");
+            return;
+        }
+        MDS.cmd("balance", function (j) {
+            var toks = [];
+            var arr = (j && j.status && Array.isArray(j.response)) ? j.response : [];
+            arr.forEach(function (t) {
+                var tid = t.tokenid || "";
+                if (PP.isMinima(tid)) return;
+                var sendable = PP.decOr(t.sendable, 0);
+                if (!tid || sendable.lte(0)) return;
+                toks.push({ tokenid: tid, name: PP.tokenName(t.token, tid), decimals: PP.tokenDecimals(t.token), avail: sendable });
+            });
+            if (!toks.length) { openInfo("No tokens to pool", "Your wallet holds no custom tokens. Receive some (e.g. mxUSDT) first, then create a MINIMA/token pool."); return; }
+            var body = document.createElement("div");
+            toks.forEach(function (t) {
+                var b = document.createElement("button");
+                b.className = "token-pick";
+                b.innerText = t.name + "  ·  " + trim(t.avail) + " avail";
+                b.onclick = function () { close(); createForm(t); };
+                body.appendChild(b);
+            });
+            var close = openModal("Pool MINIMA with…", body, null);
+        });
+    }
+    function createForm(t) {
+        var body = document.createElement("div");
+        var mIn = field(body, "MINIMA to deposit", "e.g. 100");
+        var tIn = field(body, t.name + " to deposit", "e.g. 0.56");
+        var preview = document.createElement("div"); preview.className = "modal__note"; body.appendChild(preview);
+        function update() {
+            var x = parseDec(mIn.value), y = parseDec(tIn.value);
+            if (!x || !y || x.lte(0) || y.lte(0)) { preview.innerText = "Enter both amounts."; return; }
+            if (!Covenant.sizeOk(x, y)) { preview.innerText = "Amounts too large (x × y must be < 2^64)."; return; }
+            var yc = y.toDP(t.decimals, D.ROUND_DOWN);
+            var price = yc.div(x);
+            var kmin; try { kmin = Covenant.kmin(x, yc); } catch (e) { preview.innerText = e.message; return; }
+            preview.innerText = "Opening price:  " + trim8(price) + " " + t.name + " / MINIMA\nProduct floor (KMIN):  " + kmin +
+                "\n⚠ You are setting this token's opening price. Match its real market price, or arbitrageurs will correct it at your expense.";
+        }
+        mIn.addEventListener("input", update); tIn.addEventListener("input", update); update();
+        var close = openModal("Create MINIMA / " + t.name + " pool", body, null, [
+            { label: "Cancel", cls: "btn", fn: function () { close(); } },
+            { label: "Create", cls: "btn btn--primary", fn: function () {
+                var x = parseDec(mIn.value), y = parseDec(tIn.value);
+                if (!x || !y) { return; }
+                close(); doCreate(t, x, y);
+            } }
+        ]);
+    }
+    function doCreate(t, x, y) {
+        busy = true; setStatus("lpStatus", "Creating your MINIMA / " + t.name + " pool…", "dim");
+        PoolMgr.createPool(t.tokenid, t.decimals, x, y, {
+            created: function (pool, txpowid) {
+                pool.tokName = t.name;
+                Store.lpRecord(pool.address, pool.reserveM, pool.reserveT, CURRENT_BLOCK);
+                Store.actRecord("CREATE", "Create MINIMA / " + t.name + " pool  ·  " + trim(pool.reserveM) + " MINIMA + " + trim(pool.reserveT) + " " + t.name, txpowid, CURRENT_BLOCK);
+                busy = false;
+                pendingCreate = pool; pendingBlock = CURRENT_BLOCK; pendingLabel = t.name;
+                setStatus("lpStatus", "Submitted ✓ " + PP.shorten(txpowid) + " — your pool is confirming on-chain (usually 1–3 blocks). It will appear below automatically.", "ok");
+                rescan(true);
+            },
+            fail: function (m) { Store.actRecordFailed("CREATE", "Create MINIMA / " + t.name + " pool", m); busy = false; setStatus("lpStatus", "Create failed: " + m, "err"); }
+        });
+    }
+
+    // ---- add ----
+    function openAdd(addr) {
+        var p = poolByAddr(addr); if (!p) return;
+        var tl = PP.tokenLabel(p);
+        var body = document.createElement("div");
+        var mIn = field(body, "MINIMA to add", "e.g. 50");
+        var note = document.createElement("div"); note.className = "modal__note"; body.appendChild(note);
+        var price = Curve.spotPrice(p);
+        var tSide = new D(0);
+        function update() {
+            var m = parseDec(mIn.value);
+            if (m && m.gt(0)) {
+                tSide = m.times(price).toDP(p.tokDecimals, D.ROUND_DOWN);
+                note.innerText = "Balanced at the pool price: this also adds " + trim(tSide) + " " + tl + ".\nBoth sides are added in the pool's ratio so the price doesn't move.";
+            } else { tSide = new D(0); note.innerText = "Enter the MINIMA to add; the " + tl + " side is set automatically at the pool price."; }
+        }
+        mIn.addEventListener("input", update); update();
+        var close = openModal("Add liquidity", body, null, [
+            { label: "Cancel", cls: "btn", fn: function () { close(); } },
+            { label: "Add", cls: "btn btn--primary", fn: function () {
+                var m = parseDec(mIn.value);
+                if (!m || m.lte(0)) return;
+                close(); doDeposit(p, m, tSide);
+            } }
+        ]);
+    }
+    function doDeposit(p, m, t) {
+        busy = true; setStatus("lpStatus", "Adding liquidity…", "dim");
+        var tl = PP.tokenLabel(p);
+        PoolMgr.deposit(p, m, t, {
+            ok: function (txpowid) {
+                Store.lpUpdateFeeBase(p.address, PP.dec(p.reserveM).plus(m), PP.dec(p.reserveT).plus(t));
+                Store.actRecord("DEPOSIT", "Add to MINIMA / " + tl + "  ·  " + trim(m) + " MINIMA + " + trim(t) + " " + tl, txpowid, CURRENT_BLOCK);
+                busy = false; setStatus("lpStatus", "Liquidity added ✓ " + PP.shorten(txpowid) + " — confirming on-chain.", "ok"); rescan(true);
+            },
+            fail: function (msg) { Store.actRecordFailed("DEPOSIT", "Add to MINIMA / " + tl, msg); busy = false; setStatus("lpStatus", "Add failed: " + msg, "err"); }
+        });
+    }
+
+    // ---- migrate ----
+    function openMigrate(addr) {
+        var p = poolByAddr(addr); if (!p) return;
+        var tl = PP.tokenLabel(p);
+        var body = document.createElement("div");
+        var blurb = document.createElement("div"); blurb.className = "modal__desc";
+        blurb.innerText = "Migrate resets the pool at a fresh address with the KMIN floor recomputed for the new size. Your current reserves return to you and the new reserves are taken from your wallet. Defaults keep the same size.";
+        body.appendChild(blurb);
+        var mIn = field(body, "New MINIMA reserve", ""); mIn.value = trim(p.reserveM);
+        var tIn = field(body, "New " + tl + " reserve", ""); tIn.value = trim(p.reserveT);
+        var close = openModal("Migrate pool", body, null, [
+            { label: "Cancel", cls: "btn", fn: function () { close(); } },
+            { label: "Migrate", cls: "btn btn--primary", fn: function () {
+                var x = parseDec(mIn.value), y = parseDec(tIn.value);
+                if (!x || !y) return;
+                close(); doMigrate(p, x, y);
+            } }
+        ]);
+    }
+    function doMigrate(p, x, y) {
+        busy = true; setStatus("lpStatus", "Migrating your pool…", "dim");
+        var tl = PP.tokenLabel(p);
+        PoolMgr.migrate(p, x, y, {
+            created: function (np, txpowid) {
+                np.tokName = p.tokName;
+                Store.lpRecord(np.address, np.reserveM, np.reserveT, CURRENT_BLOCK);
+                Store.lpRemove(p.address);
+                Store.actRecord("MIGRATE", "Migrate MINIMA / " + tl + " pool  ·  new size " + trim(np.reserveM) + " MINIMA + " + trim(np.reserveT) + " " + tl, txpowid, CURRENT_BLOCK);
+                busy = false; setStatus("lpStatus", "Migrated ✓ " + PP.shorten(txpowid) + " — confirming on-chain.", "ok"); rescan(true);
+            },
+            fail: function (msg) { Store.actRecordFailed("MIGRATE", "Migrate MINIMA / " + tl + " pool", msg); busy = false; setStatus("lpStatus", "Migrate failed: " + msg, "err"); }
+        });
+    }
+
+    // ---- close ----
+    function confirmClose(addr) {
+        var p = poolByAddr(addr); if (!p) return;
+        var tl = PP.tokenLabel(p);
+        openConfirm("Withdraw all liquidity?",
+            "This closes the MINIMA / " + tl + " pool and sweeps " + trim(p.reserveM) + " MINIMA + " + trim(p.reserveT) + " " + tl + " (including earned fees) back to your wallet.",
+            "Withdraw", function () {
+                busy = true; setStatus("lpStatus", "Closing pool…", "dim");
+                var summary = "Withdraw MINIMA / " + tl + "  ·  " + trim(p.reserveM) + " MINIMA + " + trim(p.reserveT) + " " + tl + " back to wallet";
+                PoolMgr.close(p, {
+                    ok: function (txpowid) { Store.lpRemove(p.address); Store.actRecord("CLOSE", summary, txpowid, CURRENT_BLOCK); busy = false; setStatus("lpStatus", "Pool closed ✓ " + PP.shorten(txpowid) + " — funds returning (confirming on-chain).", "ok"); rescan(true); },
+                    fail: function (msg) { Store.actRecordFailed("CLOSE", summary, msg); busy = false; setStatus("lpStatus", "Close failed: " + msg, "err"); }
+                });
+            });
+    }
+
+    // ================================================================ WALLET
+    function loadRecvAddr() {
+        MDS.cmd("getaddress", function (j) {
+            var r = j && j.response;
+            if (r) { RECV_ADDR = r.miniaddress || r.address || ""; el("recvAddr").innerText = RECV_ADDR || "…"; }
+        });
+    }
+    function copyAddr() {
+        if (!RECV_ADDR) return;
+        try { navigator.clipboard.writeText(RECV_ADDR); } catch (e) {}
+        setStatus("lpStatus", "", "dim");
+        var a = el("recvAddr"); var old = a.innerText; a.innerText = "Copied ✓"; setTimeout(function () { a.innerText = old; }, 1200);
+    }
+    function refreshBalance() {
+        MDS.cmd("balance", function (j) {
+            var arr = (j && j.status && Array.isArray(j.response)) ? j.response : [];
+            var minSend = "0";
+            var pairTid = pairPools.length ? pairPools[0].tok : null;
+            var tokSend = null;
+            arr.forEach(function (b) {
+                if (b.tokenid === "0x00") minSend = b.sendable || "0";
+                if (pairTid && b.tokenid === pairTid) tokSend = b.sendable || "0";
+            });
+            swapMinBal = minSend;
+            swapTokBal = tokSend;
+            var _mb = el("minimaBalance"); if (_mb) _mb.innerText = trim6(minSend) + " MINIMA";
+            renderSwapBalances();
+            if (activeView === "wallet") renderWalletCards(arr);
+        });
+    }
+    // ---- token web-validation (ported from native WebValidate.java — the same check Minima Core / the wallets show) ----
+    var MINIMA_ICON = "minima.svg";              // the official bundled Minima coin mark
+    var VAL_CACHE = {}, VAL_INFLIGHT = {};       // norm(tokenid) -> true | false | undefined(not checked)
+    var lastWalletArr = null, walletRerenderPending = false;
+    function normTid(t) { t = String(t || "").trim().toLowerCase(); return t.indexOf("0x") === 0 ? t.substring(2) : t; }
+    function isValidated(tid) { return VAL_CACHE[normTid(tid)] === true; }
+    function tokenWebvalidate(token) {
+        if (!token || typeof token !== "object") return "";
+        var nm = token.name;
+        if (nm && typeof nm === "object" && nm.webvalidate) return String(nm.webvalidate);
+        if (token.webvalidate) return String(token.webvalidate);
+        return "";
+    }
+    function blockedHost(u) {   // SSRF guard: no loopback/LAN webvalidate targets (mirrors ImageLoader.isBlockedHost)
+        try {
+            var h = new URL(u).hostname.toLowerCase();
+            if (h === "localhost" || h === "0.0.0.0" || h === "::1") return true;
+            if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h)) return true;
+            if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+            return /\.local$/.test(h) || /\.internal$/.test(h);
+        } catch (e) { return true; }
+    }
+    function netText(res) {   // best-effort raw text from an MDS.net.GET response (string / base64 / object)
+        if (!res || res.status === false) return "";
+        var b = res.response;
+        if (b && typeof b === "object" && b.data != null) b = b.data;
+        if (typeof b === "string") { var s = b; try { var d = atob(b); if (/[<{]/.test(d)) s += " " + d; } catch (e) {} return s; }
+        if (b && typeof b === "object") { try { return JSON.stringify(b); } catch (e) {} }
+        return "";
+    }
+    // a token is web-validated when the file at its `webvalidate` URL contains the tokenid (proves domain control)
+    function webValidate(tokenid, url, onDone) {
+        var k = normTid(tokenid);
+        if (k in VAL_CACHE) return;
+        url = (url || "").trim();
+        if (!url || url.indexOf("http") !== 0 || blockedHost(url)) { VAL_CACHE[k] = false; return; }
+        if (VAL_INFLIGHT[k]) return;
+        VAL_INFLIGHT[k] = true;
+        MDS.net.GET(url, function (res) {
+            delete VAL_INFLIGHT[k];
+            var body = netText(res).toLowerCase();
+            var tid = String(tokenid).toLowerCase(), bare = tid.indexOf("0x") === 0 ? tid.substring(2) : tid;
+            VAL_CACHE[k] = body.indexOf(tid) >= 0 || (bare.length >= 8 && body.indexOf(bare) >= 0);
+            if (onDone) onDone();
+        });
+    }
+    function scheduleWalletRerender() {   // coalesce many validation results into one repaint
+        if (walletRerenderPending) return;
+        walletRerenderPending = true;
+        setTimeout(function () { walletRerenderPending = false; if (activeView === "wallet" && lastWalletArr) renderWalletCards(lastWalletArr); }, 350);
+    }
+
+    function renderWallet() { MDS.cmd("balance", function (j) { renderWalletCards((j && j.status && Array.isArray(j.response)) ? j.response : []); }); }
+    function renderWalletCards(arr) {
+        arr = arr.slice().sort(function (x, y) {
+            var mx = x.tokenid === "0x00", my = y.tokenid === "0x00";
+            if (mx !== my) return mx ? -1 : 1;
+            return PP.decOr(y.sendable, 0).cmp(PP.decOr(x.sendable, 0));
+        });
+        lastWalletArr = arr;                       // kept so a webvalidate result can repaint without a refetch
+        var html = "";
+        arr.forEach(function (b) {
+            var tid = b.tokenid || "";
+            var name = PP.tokenName(b.token, tid);
+            var sendable = PP.decOr(b.sendable, 0), confirmed = PP.decOr(b.confirmed, 0);
+            var locked = confirmed.minus(sendable);
+            var iconInner, validated;
+            if (tid === "0x00") {
+                iconInner = '<img class="tok-icon tok-icon--native" src="' + MINIMA_ICON + '" alt="Minima">';
+                validated = true;                  // the native coin is inherently official
+            } else {
+                var ident = buildIdenticon(tid);
+                var real = resolveTokenIcon(b.token, tid);
+                iconInner = '<img class="tok-icon" src="' + escAttr(real || ident) + '" onerror="this.onerror=null;this.src=\'' + ident + '\'">';
+                var wv = tokenWebvalidate(b.token);
+                if (wv) webValidate(tid, wv, scheduleWalletRerender);
+                validated = isValidated(tid);
+            }
+            var iconHtml = '<span class="tok-wrap">' + iconInner + (validated ? '<span class="tok-badge" title="Web-validated">✓</span>' : '') + '</span>';
+            html += '<div class="card' + (tid === "0x00" ? " card--accent" : "") + '"><div class="card__title">' + iconHtml + esc(name.toUpperCase()) + '</div>' +
+                kvRow("Sendable", PP.tidy(sendable), "green");
+            if (locked.gt(0)) html += kvRow("Locked (in pools)", PP.tidy(locked));
+            if (PP.decOr(b.unconfirmed, 0).gt(0)) html += kvRow("Pending", PP.tidy(b.unconfirmed));
+            html += kvRow("Coins", String(b.coins || "0")) + '</div>';
+        });
+        el("walletList").innerHTML = html || '<div class="empty">No balances yet.</div>';
+    }
+
+    // ================================================================ ACTIVITY
+    function setScope(global) {
+        showGlobal = global;
+        el("actMineChip").classList.toggle("chip--active", !global);
+        el("actGlobalChip").classList.toggle("chip--active", global);
+        renderActivity();
+    }
+    function renderActivity() { if (showGlobal) renderGlobal(); else renderMyActivity(); }
+    function renderMyActivity() {
+        Store.actList(60, function (log) {
+            // in-flight (not yet confirmed, or a recent failure) AND confirmed — both drawn from the ActivityLog
+            // so a confirmed swap KEEPS its amounts instead of vanishing the instant it confirms.
+            var inflight = log.filter(function (e) { return e.failed ? (Date.now() - e.ts < 6 * 3600000) : !Store.confirmed(e, CURRENT_BLOCK); });
+            var confirmedLog = log.filter(function (e) { return !e.failed && Store.confirmed(e, CURRENT_BLOCK); });
+            var shownTx = {};
+            var html = "";
+            if (inflight.length) {
+                html += '<div class="view__sub">In flight</div>';
+                inflight.forEach(function (e) { if (e.txpowid) shownTx[e.txpowid.toLowerCase()] = true; html += activityCard(e); });
+            }
+            if (confirmedLog.length) {
+                html += '<div class="view__sub">Confirmed</div>';
+                confirmedLog.forEach(function (e) { if (e.txpowid) shownTx[e.txpowid.toLowerCase()] = true; html += activityCard(e); });
+            }
+            renderOnchainHistory(html, shownTx);
+        });
+    }
+    function activityCard(e) {
+        var cls = e.failed ? "err" : Store.confirmed(e, CURRENT_BLOCK) ? "ok" : "warn";
+        var meta = e.failed && e.failMsg ? e.failMsg : (e.txpowid ? PP.shorten(e.txpowid) + " · " + rel(e.ts) : rel(e.ts));
+        return '<div class="card"><div class="kv"><span class="kv__k" style="color:var(--heading);font-weight:700">' + esc(prettyType(e.type)) + '</span><span class="statuschip statuschip--' + cls + '">' + esc(Store.statusText(e, CURRENT_BLOCK)) + '</span></div>' +
+            '<div class="row__l1">' + esc(e.summary) + '</div><div class="row__l2">' + esc(meta) + '</div></div>';
+    }
+    function renderOnchainHistory(prefix, shownTx) {
+        shownTx = shownTx || {};
+        // tokenid → label learned from the discovered pools, so an external on-chain swap names both legs
+        var labels = { "0x00": "MINIMA" };
+        POOLS.forEach(function (p) { if (p && p.tok) labels[p.tok] = PP.tokenLabel(p); });
+        MDS.cmd("history", function (j) {
+            var rows = "";
+            try {
+                var resp = j && j.response;
+                var txp = resp && resp.txpows;
+                var det = resp && resp.details;   // details[] carry per-tx `difference` — key by txpowid, not index
+                var diffById = {};
+                if (Array.isArray(det)) det.forEach(function (dd) {
+                    var id = dd && (dd.txpowid || (dd.txpow && dd.txpow.txpowid));
+                    if (id) diffById[String(id).toLowerCase()] = dd.difference;
+                });
+                var list = Array.isArray(txp) ? txp : (Array.isArray(det) ? det : (Array.isArray(resp) ? resp : []));
+                list.slice(0, 40).forEach(function (h, i) {
+                    var tp = h.txpow || h;
+                    var txid = (tp && tp.txpowid) || h.txpowid || "";
+                    var blk = (tp && tp.header && tp.header.block) || h.block || "";
+                    if (!txid) return;
+                    if (shownTx[txid.toLowerCase()]) return;   // already shown above as a local ActivityLog entry
+                    var diff = diffById[txid.toLowerCase()] || (h && h.difference) || null;
+                    var legs = swapLegs(diff, labels);
+                    if (legs) {
+                        rows += '<div class="row"><span class="row__glyph">⇄</span><div class="row__mid"><div class="row__l1">' + esc(legs) + '</div><div class="row__l2">on-chain swap · ' + esc(PP.shorten(txid)) + '</div></div><div class="row__r">#' + esc(String(blk)) + '</div></div>';
+                    } else {
+                        rows += '<div class="row"><span class="row__glyph">⟲</span><div class="row__mid"><div class="row__l1">' + esc(PP.shorten(txid)) + '</div><div class="row__l2">on-chain transaction</div></div><div class="row__r">#' + esc(String(blk)) + '</div></div>';
+                    }
+                });
+            } catch (e) {}
+            var html = prefix;
+            if (rows) html += '<div class="view__sub">Confirmed on-chain</div>' + rows;
+            if (!html) html = '<div class="empty">No activity yet.\nYour swaps, pool creates and withdrawals appear here.</div>';
+            el("actList").innerHTML = html;
+        });
+    }
+    function renderGlobal() {
+        Store.feedList(100, function (events) {
+            if (!events.length) { el("actList").innerHTML = '<div class="empty">No pool swaps seen yet.\nSwaps across all pools — including other people\'s — appear here as they happen.</div>'; return; }
+            var html = '<div class="view__sub">Live pool swaps</div>';
+            events.forEach(function (ev) {
+                var m = trim6(ev.minimaAmt), t = trim6(ev.tokenAmt), tl = ev.tokenLabel;
+                var desc = ev.minimaIn ? ("Sold " + m + " MINIMA → " + t + " " + tl) : ("Bought " + m + " MINIMA ← " + t + " " + tl);
+                html += '<div class="row"><span class="row__glyph">⇄</span><div class="row__mid"><div class="row__l1">' + esc(desc) + '</div><div class="row__l2">' + trim6(ev.price) + " " + esc(tl) + "/MINIMA · " + esc(PP.shorten(ev.pool)) + " · " + rel(ev.ts) + '</div></div></div>';
+            });
+            el("actList").innerHTML = html;
+        });
+    }
+    function gotoActivity() { document.querySelector('.tab[data-view="activity"]').click(); }
+
+    // ◐ STYLE — mirrors the native Design.next()/recreate(): cycle the 3 skins, persist, pure CSS-var swap.
+    var THEMES = ["", "original-light", "original-dark"];   // "" = CURRENT (default dark-orange)
+    function applyTheme(t) {
+        if (t) document.documentElement.setAttribute("data-theme", t);
+        else document.documentElement.removeAttribute("data-theme");
+        try { localStorage.setItem("pp_theme", t); } catch (e) {}
+    }
+    function cycleTheme() {
+        var cur = ""; try { cur = localStorage.getItem("pp_theme") || ""; } catch (e) {}
+        var i = THEMES.indexOf(cur); if (i < 0) i = 0;
+        applyTheme(THEMES[(i + 1) % THEMES.length]);
+    }
+    // (initial data-theme is restored by the inline <head> script, before first paint — no FOUC)
+
+    // ---------------------------------------------------------------- small helpers
+    function el(id) { return document.getElementById(id); }
+    function esc(s) { return String(s === undefined || s === null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+    function kvRow(k, v, vcls) { return '<div class="kv"><span class="kv__k">' + esc(k) + '</span><span class="kv__v' + (vcls ? " kv__v--" + vcls : "") + '">' + esc(v) + '</span></div>'; }
+    function setStatus(id, msg, cls) { var e = el(id); if (!e) return; e.className = "status status--" + (cls || "dim"); e.innerText = msg; }
+    function parseDec(s) { if (s === null || s === undefined) return null; s = String(s).trim(); if (!s) return null; try { var d = new D(s); return d; } catch (e) { return null; } }
+    function trim(d) { return PP.plain(d); }
+    function trim8(d) { return PP.fix(d, 8); }
+    function trim6(d) { return PP.fix(d, 6); }   // top-indicator rounding (wallet keeps full precision via PP.tidy)
+
+    // ---- external market price (MEXC) — read-only, off the main flow, rate-limited ----
+    function marketFresh() { return mktMid > 0 && (Date.now() - mktAt) <= MKT_FRESH_MS; }
+    function netBody(res) {
+        if (!res || res.status === false) return null;
+        var b = res.response;
+        if (b && typeof b === "object" && b.data != null) b = b.data;
+        if (typeof b === "string") { try { return JSON.parse(b); } catch (e) { try { return JSON.parse(atob(b)); } catch (e2) { return null; } } }
+        return (b && typeof b === "object") ? b : null;
+    }
+    function effLevel(side) {   // price where cumulative price*qty first reaches MKT_MIN_USDT (dust-proof)
+        if (!Array.isArray(side)) return 0;
+        var cum = 0;
+        for (var i = 0; i < side.length; i++) {
+            var px = parseFloat(side[i][0]), qty = parseFloat(side[i][1]);
+            if (!(px > 0) || !(qty > 0)) return 0;
+            cum += px * qty;
+            if (cum >= MKT_MIN_USDT) return px;
+        }
+        return 0;
+    }
+    function acceptMid(b, a) {
+        if (!(b > 0) || !(a > 0) || b > a) return;
+        if ((a - b) / a >= 0.2) return;               // book too thin/wide to quote
+        var m = (a + b) / 2;
+        if (m > 0 && isFinite(m)) { mktMid = m; mktAt = Date.now(); }
+    }
+    function refreshMarket() {
+        var now = Date.now();
+        if (mktFetching || now - mktLastTry < MKT_GAP_MS) return;
+        mktFetching = true; mktLastTry = now;
+        setTimeout(function () { mktFetching = false; }, 15000);   // guard: net.GET failure may not call back
+        MDS.net.GET(MKT_DEPTH, function (res) {
+            var j = netBody(res);
+            if (j && (j.bids || j.asks)) { acceptMid(effLevel(j.bids), effLevel(j.asks)); mktFetching = false; renderSwapMarket(); return; }
+            MDS.net.GET(MKT_BOOK, function (res2) {
+                var k = netBody(res2);
+                if (k) acceptMid(parseFloat(k.bidPrice), parseFloat(k.askPrice));
+                mktFetching = false; renderSwapMarket();
+            });
+        });
+    }
+    function renderSwapMarket() {
+        var host = el("swapMarketLine"); if (!host) return;
+        // the MEXC feed is MINIMA/USDT, so only comparable when this pool's token IS USDT
+        var isUsdt = pairPools.length && String(pairLabel).toUpperCase() === "USDT";
+        if (!isUsdt) { host.innerText = ""; host.style.display = "none"; return; }
+        host.style.display = "";
+        if (!marketFresh()) { host.innerText = "Market price unavailable (MEXC)"; return; }
+        var mid = PP.dec(mktMid);
+        var line = "Market ≈ " + PP.fix(mid, 6) + " USDT/MINIMA (MEXC)";
+        var sm = PP.dec(0), st = PP.dec(0);
+        pairPools.forEach(function (p) { sm = sm.plus(PP.dec(p.reserveM)); st = st.plus(PP.dec(p.reserveT)); });
+        if (sm.gt(0)) {
+            var spot = st.div(sm);                    // blended pool price, USDT per MINIMA
+            var pct = spot.minus(mid).div(mid).times(100);
+            var word = pct.abs().lt(0.1) ? "at market" : (PP.fix(pct.abs(), 1) + "% " + (pct.gt(0) ? "above market" : "below market"));
+            line += "  ·  Pool " + PP.fix(spot, 6) + "  ·  " + word;
+        }
+        host.innerText = line;
+    }
+    // name both legs of an on-chain swap from its per-token difference map (parity with native 0.8.5)
+    function legLabel(tid, labels) {
+        if (!tid || tid === "0x00") return "MINIMA";
+        return labels[tid] || PP.shorten(tid);
+    }
+    function swapLegs(diff, labels) {
+        if (!diff || typeof diff !== "object") return null;
+        var pos = null, neg = null, posA = null, negA = null, nz = 0;
+        for (var tid in diff) {
+            if (!diff.hasOwnProperty(tid)) continue;
+            var a; try { a = new D(diff[tid]); } catch (e) { continue; }
+            if (a.isZero()) continue;
+            nz++;
+            if (a.gt(0)) { pos = tid; posA = a; } else { neg = tid; negA = a; }
+        }
+        if (nz !== 2 || pos === null || neg === null) return null;
+        return "−" + PP.fix(negA.abs(), 6) + " " + legLabel(neg, labels) + "  ·  +" + PP.fix(posA, 6) + " " + legLabel(pos, labels);
+    }
+    function num(d) { try { return parseFloat(PP.dec(d).toString()); } catch (e) { return 0; } }
+    function fmt(x) { if (isNaN(x) || !isFinite(x)) return "—"; return new D(x).toDP(4, D.ROUND_DOWN).toString(); }
+    function prettyType(t) { return ({ CREATE: "Create pool", SWAP: "Swap", DEPOSIT: "Add liquidity", MIGRATE: "Migrate pool", CLOSE: "Withdraw / close" })[t] || t; }
+    function rel(ms) { if (!ms) return ""; var d = Date.now() - ms; if (d < 60000) return "just now"; if (d < 3600000) return Math.floor(d / 60000) + "m ago"; if (d < 86400000) return Math.floor(d / 3600000) + "h ago"; return Math.floor(d / 86400000) + "d ago"; }
+    function field(box, label, hint) {
+        var wrap = document.createElement("label"); wrap.className = "field";
+        var l = document.createElement("span"); l.className = "field__label"; l.innerText = label; wrap.appendChild(l);
+        var i = document.createElement("input"); i.className = "field__input"; i.type = "number"; i.step = "any"; i.min = "0"; i.placeholder = hint; wrap.appendChild(i);
+        box.appendChild(wrap); return i;
+    }
+
+    // ---- token icons (ported from the native IconResolver.resolve + Identicon.forToken) ----
+    // Turn a token's raw url/icon string into something an <img> can load (a data: URI or http(s) URL);
+    // null when nothing image-shaped is present (caller draws the deterministic identicon).
+    function resolveTokenIcon(token, tokenid) {
+        if (PP.isMinima(tokenid)) return null;   // native coin → the built-in mark
+        var raw = "";
+        if (token && typeof token === "object") {
+            var nm = token.name;
+            if (nm && typeof nm === "object") raw = nm.url || nm.icon || "";
+            if (!raw) raw = token.url || token.icon || "";
+        } else if (typeof token === "string") { raw = token; }
+        if (!raw || typeof raw !== "string") return null;
+        var t = raw.trim();
+        if (!t) return null;
+        if (/%[0-9A-Fa-f]{2}/.test(t)) { try { t = decodeURIComponent(t).trim(); } catch (e) {} }
+        var art = /<artimage[^>]*>([\s\S]*?)<\/artimage>/i.exec(t);
+        if (art) { var b64 = art[1].replace(/\s+/g, ""); if (b64.length > 16) return "data:image/jpeg;base64," + b64; }
+        if (/^data:image\/(png|jpe?g|gif|webp|svg\+xml|x-icon|bmp);/i.test(t)) return t;
+        if (/^https?:\/\//i.test(t)) return t;
+        if (/^<svg/i.test(t) && /<\/svg>\s*$/i.test(t)) {
+            try { return "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(t))); } catch (e) { return null; }
+        }
+        if (t.length >= 100 && /^[A-Za-z0-9+/]+={0,2}$/.test(t)) return "data:image/png;base64," + t;
+        return null;
+    }
+    // Deterministic 5×5 vertically-mirrored identicon → inline-SVG data URI. Same tokenid → same picture.
+    function buildIdenticon(tokenid) {
+        var hex = String(tokenid || "").replace(/^0x/i, "").toLowerCase();
+        while (hex.length < 32) hex += "0";
+        var hue = parseInt(hex.substring(0, 4), 16) % 360;
+        var sat = 55 + (parseInt(hex.substring(4, 6), 16) % 25);
+        var light = 48 + (parseInt(hex.substring(6, 8), 16) % 10);
+        var fg = "hsl(" + hue + "," + sat + "%," + light + "%)";
+        var bg = "hsl(" + hue + "," + Math.max(20, sat - 30) + "%,12%)";
+        var rects = "";
+        for (var r = 0; r < 5; r++) {
+            for (var c = 0; c < 3; c++) {
+                var idx = (r * 3 + c + 8) % 32;
+                if ((parseInt(hex.charAt(idx), 16) & 1) === 0) continue;
+                var mirror = (c === 0) ? 4 : (c === 1 ? 3 : 2);
+                rects += idCell(c, r, fg);
+                if (mirror !== c) rects += idCell(mirror, r, fg);
+            }
+        }
+        var svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect width="48" height="48" fill="' + bg + '"/>' + rects + '</svg>';
+        return "data:image/svg+xml;base64," + btoa(svg);
+    }
+    function idCell(col, row, fg) {
+        var x = col * 8 + 4, y = row * 8 + 4;
+        return '<rect x="' + x + '" y="' + y + '" width="8" height="8" fill="' + fg + '"/>';
+    }
+    function escAttr(s) { return esc(s).replace(/"/g, "&quot;"); }
+
+    // ---- modals ----
+    function openModal(title, bodyNode, onOpen, buttons) {
+        var ov = document.createElement("div"); ov.className = "overlay";
+        var m = document.createElement("div"); m.className = "modal";
+        var h = document.createElement("div"); h.className = "modal__title"; h.innerText = title; m.appendChild(h);
+        m.appendChild(bodyNode);
+        function close() { if (ov.parentNode) ov.parentNode.removeChild(ov); }
+        if (buttons) {
+            var acts = document.createElement("div"); acts.className = "modal__actions";
+            buttons.forEach(function (b) { var btnEl = document.createElement("button"); btnEl.className = b.cls; btnEl.innerText = b.label; btnEl.onclick = b.fn; acts.appendChild(btnEl); });
+            m.appendChild(acts);
+        }
+        ov.appendChild(m);
+        ov.onclick = function (e) { if (e.target === ov) close(); };
+        document.body.appendChild(ov);
+        if (onOpen) onOpen();
+        return close;
+    }
+    function openConfirm(title, text, okLabel, onOk) {
+        var body = document.createElement("div"); var p = document.createElement("div"); p.className = "modal__desc"; p.style.whiteSpace = "pre-wrap"; p.innerText = text; body.appendChild(p);
+        var close = openModal(title, body, null, [
+            { label: "Cancel", cls: "btn", fn: function () { close(); } },
+            { label: okLabel, cls: "btn btn--primary", fn: function () { close(); onOk(); } }
+        ]);
+    }
+    function openInfo(title, text) {
+        var body = document.createElement("div"); var p = document.createElement("div"); p.className = "modal__desc"; p.innerText = text; body.appendChild(p);
+        var close = openModal(title, body, null, [{ label: "OK", cls: "btn btn--primary", fn: function () { close(); } }]);
+    }
+
+    return {
+        rescan: rescan, confirmSwap: confirmSwap,
+        openCreate: openCreate, openAdd: openAdd, openMigrate: openMigrate, confirmClose: confirmClose, dismissPending: dismissPending,
+        copyAddr: copyAddr, setScope: setScope, gotoActivity: gotoActivity, cycleTheme: cycleTheme
+    };
+})();
+</script>
+</body>
+</html>
