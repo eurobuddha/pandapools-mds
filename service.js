@@ -119,21 +119,56 @@ function pow10(n) { var r = BigInt(1), t = BigInt(10); for (var i = 0; i < n; i+
 MDS.init(function (msg) {
     if (msg.event === "inited") {
         MDS.cmd("coinnotify action:add address:" + SENTINEL, function () {});
-        ensureTables(function () { READY = true; MDS.log("PandaPools service ready"); scan(); });
+        ensureTables(function () { READY = true; MDS.log("PandaPools service ready"); retrackOwn(); scan(); });
     }
     if (msg.event === "NEWBLOCK") { if (READY) scan(); }
 });
 
 function ensureTables(cb) {
+    function done() { ensureOwn(cb); }   // pp_ownpools shared with the page (store.js)
     MDS.sql("SELECT 1 FROM pp_feed LIMIT 1", function (r) {
-        if (r && r.status) { migrateFeedKind(cb); return; }   // exists (maybe a pre-kind install) → migrate
+        if (r && r.status) { migrateFeedKind(done); return; }   // exists (maybe a pre-kind install) → migrate
         MDS.sql(
             "CREATE TABLE IF NOT EXISTS `pp_feed` (" +
             " `id` bigint auto_increment, `pool` varchar(80) NOT NULL, `tokenlabel` varchar(80) NOT NULL," +
             " `kind` varchar(12) NOT NULL DEFAULT 'SWAP'," +
             " `minimain` int NOT NULL, `minimaamt` varchar(90) NOT NULL, `tokenamt` varchar(90) NOT NULL," +
             " `price` varchar(90) NOT NULL, `ts` bigint NOT NULL)", function () {
-            MDS.sql("CREATE TABLE IF NOT EXISTS `pp_kv` (`k` varchar(64) NOT NULL PRIMARY KEY, `v` text NOT NULL)", function () { cb(); });
+            MDS.sql("CREATE TABLE IF NOT EXISTS `pp_kv` (`k` varchar(64) NOT NULL PRIMARY KEY, `v` text NOT NULL)", function () { done(); });
+        });
+    });
+}
+// pp_ownpools is written by the page (store.js ownRecord); the service only reads it (re-track on launch).
+function ensureOwn(cb) {
+    MDS.sql("SELECT 1 FROM pp_ownpools LIMIT 1", function (r) {
+        if (r && r.status) { cb(); return; }
+        MDS.sql(
+            "CREATE TABLE IF NOT EXISTS `pp_ownpools` (" +
+            " `address` varchar(80) NOT NULL PRIMARY KEY, `mx` varchar(80)," +
+            " `opk` varchar(140) NOT NULL, `oadr` varchar(80) NOT NULL, `tok` varchar(80) NOT NULL," +
+            " `tdec` int NOT NULL, `kmin` varchar(120) NOT NULL, `script` text)", function () { cb(); });
+    });
+}
+// Layer 2 — re-track on launch (headless): re-register every owned-pool covenant so a wiped/re-synced node
+// re-tracks it and discovery finds it again, even while the page is closed. Gated on already-tracked (one
+// `scripts` read up front) so a NORMAL launch fires ZERO writes — only a node that has actually LOST the
+// tracking (wipe/resync) issues newscript, keeping restricted nodes prompt-free. Prefers the stored
+// authoritative script; reconstructs from params only as a fallback.
+function retrackOwn() {
+    MDS.sql("SELECT * FROM pp_ownpools", function (r) {
+        if (!r || !r.status || !r.rows || !r.rows.length) return;
+        var recipes = r.rows;
+        MDS.cmd("scripts", function (sres) {
+            var tracked = {};
+            var arr = (sres && sres.status && Array.isArray(sres.response)) ? sres.response : [];
+            for (var i = 0; i < arr.length; i++) { var ad = arr[i] && arr[i].address; if (ad) tracked[String(ad).toLowerCase()] = true; }
+            recipes.forEach(function (row) {
+                var addr = row.ADDRESS ? String(row.ADDRESS).toLowerCase() : "";
+                if (!addr || tracked[addr]) return;   // already tracked → no redundant write
+                var script = (row.SCRIPT && row.SCRIPT.length) ? row.SCRIPT
+                           : (row.OPK && row.OADR && row.TOK && row.KMIN ? covScript(row.OPK, row.OADR, row.TOK, row.KMIN) : "");
+                if (script) MDS.cmd("newscript trackall:true script:" + scriptArg(script), function () {});
+            });
         });
     });
 }

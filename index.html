@@ -13,7 +13,7 @@
         <div class="hdr__logo">
             <span class="hdr__mark">◈</span>
             <span class="hdr__title">PandaPools</span>
-            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.2.0</span></span>
+            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.3.0</span></span>
         </div>
         <div class="hdr__wallet">
             <span class="hdr__style" onclick="App.cycleTheme()">◐ STYLE</span>
@@ -120,13 +120,14 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.2.0";
+var PANDAPOOLS_VERSION = "0.3.0";
 
 var App = (function () {
     var D = Decimal;
     var CURRENT_BLOCK = 0;
     var POOLS = [];
     var MY_KEYS = {};
+    var ownBackfilled = {};   // addresses whose owned-pool recipe we've backfilled this session (avoid re-writing)
     var RECV_ADDR = "";
     var scanning = false, busy = false, posting = false;
     var activeView = "swap";
@@ -167,7 +168,20 @@ var App = (function () {
         el("swapAmount").addEventListener("input", requote);
         Store.init(function () {
             MDS.cmd("block", function (r) { if (r.status && r.response) { CURRENT_BLOCK = parseInt(r.response.block) || 0; el("blockHeight").innerText = "#" + CURRENT_BLOCK; } });
+            seedKnownFromOwn();
             loadKeys(function () { refreshBalance(); refreshMarket(); loadRecvAddr(); rescan(true); });
+        });
+    }
+    // Seed the known-address set from owned-pool recipes (both forms) so My Activity matches my own create/close
+    // instantly, before the first scan. The Layer-2 RE-TRACK itself is done by the headless service
+    // (service.js retrackOwn), which runs even when the page is closed and gates on already-tracked — so the
+    // page issues NO per-recipe newscript writes (avoids a pending-approval storm on a restricted node).
+    function seedKnownFromOwn() {
+        Store.ownAll(function (recipes) {
+            if (!recipes.length) return;
+            var addrs = [];
+            recipes.forEach(function (r) { if (r.address) addrs.push(r.address); if (r.mxaddress) addrs.push(r.mxaddress); });
+            Store.knownAddrsAdd(addrs);
         });
     }
 
@@ -196,7 +210,17 @@ var App = (function () {
             // Grow the personal-activity known-address set from every discovered pool (both 0x + Mx forms),
             // persisted + never-shrink — so My Activity can keep matching a past swap on a pool that later closes.
             var addrs = [];
-            pools.forEach(function (p) { if (p) { if (p.address) addrs.push(p.address); if (p.mxaddress) addrs.push(p.mxaddress); } });
+            pools.forEach(function (p) {
+                if (!p) return;
+                if (p.address) addrs.push(p.address);
+                if (p.mxaddress) addrs.push(p.mxaddress);
+                // Backfill a recipe for a pool I own (my $OPK) but never recorded locally (e.g. created on
+                // another device) — once per session per address.
+                if (mine(p) && p.address && !ownBackfilled[p.address.toLowerCase()]) {
+                    ownBackfilled[p.address.toLowerCase()] = true;
+                    Store.ownRecord(p);
+                }
+            });
             Store.knownAddrsAdd(addrs);
             // The background service (service.js) is the SOLE global-feed ingester — it runs headless on every
             // NEWBLOCK whether the page is open or not, and owns pp_feed/pp_kv. The page only READS the feed
@@ -546,6 +570,8 @@ var App = (function () {
             created: function (pool, txpowid) {
                 pool.tokName = t.name;
                 Store.lpRecord(pool.address, pool.reserveM, pool.reserveT, CURRENT_BLOCK);
+                Store.ownRecord(pool);   // Layer 1: durable recipe → re-trackable + recoverable after a wipe
+                Store.knownAddrsAdd([pool.address, pool.mxaddress]);
                 Store.actRecord("CREATE", "Create MINIMA / " + t.name + " pool  ·  " + trim(pool.reserveM) + " MINIMA + " + trim(pool.reserveT) + " " + t.name, txpowid, CURRENT_BLOCK);
                 busy = false;
                 pendingCreate = pool; pendingBlock = CURRENT_BLOCK; pendingLabel = t.name;
@@ -621,6 +647,8 @@ var App = (function () {
             created: function (np, txpowid) {
                 np.tokName = p.tokName;
                 Store.lpRecord(np.address, np.reserveM, np.reserveT, CURRENT_BLOCK);
+                Store.ownRecord(np);   // Layer 1: recipe for the NEW pool. The OLD recipe is KEPT (harmless no-op).
+                Store.knownAddrsAdd([np.address, np.mxaddress]);
                 Store.lpRemove(p.address);
                 Store.actRecord("MIGRATE", "Migrate MINIMA / " + tl + " pool  ·  new size " + trim(np.reserveM) + " MINIMA + " + trim(np.reserveT) + " " + tl, txpowid, CURRENT_BLOCK);
                 busy = false; setStatus("lpStatus", "Migrated ✓ " + PP.shorten(txpowid) + " — confirming on-chain.", "ok"); rescan(true);

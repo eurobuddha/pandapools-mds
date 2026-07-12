@@ -255,7 +255,8 @@ var PoolMgr = (function () {
                 MDS.cmd("newscript trackall:true script:" + Covenant.scriptArg(script), function () {
                     var p = {
                         address: address, mxaddress: mx, opk: opk, oadr: oadr, tok: tokenid,
-                        kmin: kmin, tokDecimals: tokDecimals, reserveM: x0, reserveT: y0c, tokName: null
+                        kmin: kmin, tokDecimals: tokDecimals, reserveM: x0, reserveT: y0c, tokName: null,
+                        covenantScript: script   // authoritative script → stored in the recovery recipe
                     };
                     buildCreate(p, x0, y0c, tokenid, done);
                 });
@@ -352,7 +353,8 @@ var PoolMgr = (function () {
             MDS.cmd("newscript trackall:true script:" + Covenant.scriptArg(script2), function () {
                 var np = {
                     address: a2, mxaddress: mx2, opk: p.opk, oadr: p.oadr, tok: p.tok,
-                    kmin: kmin2, tokDecimals: p.tokDecimals, reserveM: newX, reserveT: newYc, tokName: p.tokName
+                    kmin: kmin2, tokDecimals: p.tokDecimals, reserveM: newX, reserveT: newYc, tokName: p.tokName,
+                    covenantScript: script2   // authoritative script → stored in the recovery recipe
                 };
                 buildMigrate(p, np, newX, newYc, done);
             });

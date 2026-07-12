@@ -22,9 +22,21 @@ var Store = (function () {
     function init(cb) {
         // probe one table; only CREATE the set if missing (avoids pending prompts)
         MDS.sql("SELECT 1 FROM pp_activity LIMIT 1", function (r) {
-            function fin() { migrateFeedKind(function () { ready = true; if (cb) cb(); }); }
+            function fin() { migrateFeedKind(function () { ensureOwnPools(function () { ready = true; if (cb) cb(); }); }); }
             if (r && r.status) { fin(); return; }
             create(fin);
+        });
+    }
+    // Ensure pp_ownpools exists for a pre-0.3.0 install (created before this table existed). Probe first so a
+    // normal run never issues a CREATE (avoids a pending SQL prompt on a restricted MDS).
+    function ensureOwnPools(cb) {
+        MDS.sql("SELECT 1 FROM pp_ownpools LIMIT 1", function (r) {
+            if (r && r.status) { cb(); return; }
+            MDS.sql(
+                "CREATE TABLE IF NOT EXISTS `pp_ownpools` (" +
+                " `address` varchar(80) NOT NULL PRIMARY KEY, `mx` varchar(80)," +
+                " `opk` varchar(140) NOT NULL, `oadr` varchar(80) NOT NULL, `tok` varchar(80) NOT NULL," +
+                " `tdec` int NOT NULL, `kmin` varchar(120) NOT NULL, `script` text)", function () { cb(); });
         });
     }
     // Add the lifecycle `kind` column to a pp_feed created by a pre-0.2.0 install (default SWAP so old rows
@@ -69,7 +81,18 @@ var Store = (function () {
                     MDS.sql(
                         "CREATE TABLE IF NOT EXISTS `pp_kv` (" +
                         " `k` varchar(64) NOT NULL PRIMARY KEY," +
-                        " `v` text NOT NULL)", function () { if (cb) cb(); });
+                        " `v` text NOT NULL)", function () {
+                        MDS.sql(
+                            "CREATE TABLE IF NOT EXISTS `pp_ownpools` (" +
+                            " `address` varchar(80) NOT NULL PRIMARY KEY," +
+                            " `mx` varchar(80)," +
+                            " `opk` varchar(140) NOT NULL," +
+                            " `oadr` varchar(80) NOT NULL," +
+                            " `tok` varchar(80) NOT NULL," +
+                            " `tdec` int NOT NULL," +
+                            " `kmin` varchar(120) NOT NULL," +
+                            " `script` text)", function () { if (cb) cb(); });
+                    });
                 });
             });
         });
@@ -212,11 +235,46 @@ var Store = (function () {
         });
     }
 
+    // -------------------------------------------------------- OwnPoolStore (Layer 1: recipe persistence)
+    // A durable, node-independent recipe for each pool THIS device owns — enough to regenerate + re-track the
+    // covenant (the script is deterministic from opk/oadr/tok/kmin, so we store params, not the script). Seed +
+    // recipe ⇒ always reclaimable. Recorded on create/migrate + backfilled on discovery; KEPT on close (a stale
+    // recipe just re-tracks a spent covenant = a harmless no-op). Grows, never auto-removed.
+    function ownRecord(p) {
+        if (!ready || !p || !p.address || !p.opk || !p.oadr || !p.tok || !p.kmin) return;
+        var a = esc(p.address.toLowerCase());
+        // Prefer the pool's AUTHORITATIVE on-chain script (exact for any fee/template); reconstruct from params
+        // only as a fallback (exact for the current template). Native does the same — this future-proofs a pool
+        // whose covenant isn't byte-reconstructible from the current TEMPLATE (e.g. a legacy-fee pool).
+        var script = (p.covenantScript && p.covenantScript.length) ? p.covenantScript
+                   : (typeof Covenant !== "undefined" ? Covenant.script(p.opk, p.oadr, p.tok, p.kmin) : "");
+        MDS.sql("DELETE FROM pp_ownpools WHERE address='" + a + "'", function () {
+            MDS.sql("INSERT INTO pp_ownpools (address, mx, opk, oadr, tok, tdec, kmin, script) VALUES ('" +
+                a + "','" + esc(p.mxaddress || "") + "','" + esc(p.opk) + "','" + esc(p.oadr) + "','" +
+                esc(p.tok) + "'," + (parseInt(p.tokDecimals) || 8) + ",'" + esc(String(p.kmin)) + "','" + esc(script) + "')");
+        });
+    }
+    /** cb(recipes[]) — each {address, mxaddress, opk, oadr, tok, tokDecimals, kmin, script}. */
+    function ownAll(cb) {
+        if (!ready) { cb([]); return; }
+        MDS.sql("SELECT * FROM pp_ownpools", function (r) {
+            var out = [];
+            if (r && r.status && r.rows) r.rows.forEach(function (row) {
+                out.push({
+                    address: row.ADDRESS, mxaddress: row.MX || "", opk: row.OPK, oadr: row.OADR,
+                    tok: row.TOK, tokDecimals: parseInt(row.TDEC) || 8, kmin: row.KMIN, script: row.SCRIPT || ""
+                });
+            });
+            cb(out);
+        });
+    }
+
     return {
         init: init, isReady: function () { return ready; },
         lpRecord: lpRecord, lpUpdateFeeBase: lpUpdateFeeBase, lpRemove: lpRemove, lpGet: lpGet,
         actRecord: actRecord, actRecordFailed: actRecordFailed, actList: actList,
         confirmed: confirmed, statusText: statusText, CONFIRM_BLOCKS: CONFIRM_BLOCKS,
-        feedList: feedList, knownAddrsGet: knownAddrsGet, knownAddrsAdd: knownAddrsAdd
+        feedList: feedList, knownAddrsGet: knownAddrsGet, knownAddrsAdd: knownAddrsAdd,
+        ownRecord: ownRecord, ownAll: ownAll
     };
 })();
