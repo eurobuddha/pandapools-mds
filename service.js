@@ -14,7 +14,10 @@
 var SENTINEL = "0x50414E4441504F4F4C53";     // "PANDAPOOLS"
 var FEED_MAX = 100;
 var READY = false;
-var PRIMED = false;   // first ingest of this service session reseeds the snapshot silently (no phantom swap)
+var PRIMED = false;   // first ingest of this service session suppresses CREATE (can't tell new from unpersisted)
+var SESSION_SEEN = {}; // addresses seen at least once this service session — a pool's FIRST sighting only
+                       // reseeds (never diffs a possibly-pre-restart snapshot), so no phantom events on restart
+var MISS_CLOSE = 2;    // consecutive scans a pool must be absent before it's emitted as a close/withdraw
 
 // The covenant template, ONE line, byte-identical to PoolCovenant/covenant.js (0.5% fee = *5/1000).
 var TEMPLATE =
@@ -123,14 +126,24 @@ MDS.init(function (msg) {
 
 function ensureTables(cb) {
     MDS.sql("SELECT 1 FROM pp_feed LIMIT 1", function (r) {
-        if (r && r.status) { cb(); return; }
+        if (r && r.status) { migrateFeedKind(cb); return; }   // exists (maybe a pre-kind install) → migrate
         MDS.sql(
             "CREATE TABLE IF NOT EXISTS `pp_feed` (" +
             " `id` bigint auto_increment, `pool` varchar(80) NOT NULL, `tokenlabel` varchar(80) NOT NULL," +
+            " `kind` varchar(12) NOT NULL DEFAULT 'SWAP'," +
             " `minimain` int NOT NULL, `minimaamt` varchar(90) NOT NULL, `tokenamt` varchar(90) NOT NULL," +
             " `price` varchar(90) NOT NULL, `ts` bigint NOT NULL)", function () {
             MDS.sql("CREATE TABLE IF NOT EXISTS `pp_kv` (`k` varchar(64) NOT NULL PRIMARY KEY, `v` text NOT NULL)", function () { cb(); });
         });
+    });
+}
+// Add the lifecycle `kind` column to a pre-0.2.0 pp_feed (default SWAP so old rows still render). The page
+// (store.js) and this headless service both run this; whichever adds the column first wins, and a duplicate
+// ALTER from the other just errors harmlessly (swallowed by the no-op callback).
+function migrateFeedKind(cb) {
+    MDS.sql("SELECT kind FROM pp_feed LIMIT 1", function (r) {
+        if (r && r.status) { cb(); return; }
+        MDS.sql("ALTER TABLE pp_feed ADD COLUMN kind varchar(12) DEFAULT 'SWAP'", function () { cb(); });
     });
 }
 
@@ -241,39 +254,79 @@ function done(pools) {
 // ---------------------------------------------------------------- GlobalFeed ingest (shares pp_feed / pp_kv)
 function ingestFeed(pools) {
     var firstScan = !PRIMED;
-    PRIMED = true;
     MDS.sql("SELECT v FROM pp_kv WHERE k='snap'", function (r) {
         var snap = {};
         if (r && r.status && r.rows && r.rows.length) { try { snap = JSON.parse(r.rows[0].V) || {}; } catch (e) { snap = {}; } }
-        var seen = {}, now = Date.now(), inserts = [];
+        var seen = {}, seenCount = 0, now = Date.now(), inserts = [];
         for (var i = 0; i < pools.length; i++) {
             var p = pools[i];
             if (!isFunded(p)) continue;
             var addr = p.address.toLowerCase();
-            seen[addr] = true;
-            var prev = snap[addr];
-            snap[addr] = p.reserveM + "|" + p.reserveT;
-            if (prev === undefined || firstScan) continue;
-            var bar = prev.indexOf("|");
-            if (bar < 0) continue;
-            var oldM = prev.substring(0, bar), oldT = prev.substring(bar + 1);
-            var cm = decCmp(p.reserveM, oldM), ct = decCmp(p.reserveT, oldT);
-            if (cm > 0 && ct < 0) {                 // MINIMA in, token out
-                var dm1 = decSub(p.reserveM, oldM), dt1 = decSub(oldT, p.reserveT);
-                inserts.push({ pool: addr, label: p.tokLabel || short(p.tok), min: 1, m: dm1, t: dt1, price: decDiv(dt1, dm1, 12), ts: now });
-            } else if (cm < 0 && ct > 0) {          // token in, MINIMA out
-                var dm2 = decSub(oldM, p.reserveM), dt2 = decSub(p.reserveT, oldT);
-                inserts.push({ pool: addr, label: p.tokLabel || short(p.tok), min: 0, m: dm2, t: dt2, price: decDiv(dt2, dm2, 12), ts: now });
+            seen[addr] = true; seenCount++;
+            var prevEnc = snap[addr];
+            var label = p.tokLabel || short(p.tok);
+            var firstSeen = !SESSION_SEEN[addr];
+            SESSION_SEEN[addr] = true;
+            snap[addr] = encSnap(p.reserveM, p.reserveT, label, 0);   // fresh reading, miss reset
+            if (firstSeen) {
+                // First sighting this service session — never diff a snapshot that may predate a restart. A pool
+                // with no persisted snapshot appearing AFTER the first scan is genuinely new → CREATE; the first
+                // scan, or a pool carried over from a prior session, reseeds silently.
+                if (!firstScan && prevEnc === undefined)
+                    inserts.push({ pool: addr, label: label, kind: "CREATE", min: 1, m: p.reserveM, t: p.reserveT, price: "0", ts: now });
+                continue;
+            }
+            var prev = decSnap(prevEnc);   // prevEnc is from THIS session → safe to diff
+            if (!prev) continue;
+            var cm = decCmp(p.reserveM, prev.m), ct = decCmp(p.reserveT, prev.t);
+            if (cm > 0 && ct < 0) {                 // SWAP — MINIMA in, token out
+                var dm1 = decSub(p.reserveM, prev.m), dt1 = decSub(prev.t, p.reserveT);
+                inserts.push({ pool: addr, label: label, kind: "SWAP", min: 1, m: dm1, t: dt1, price: decDiv(dt1, dm1, 12), ts: now });
+            } else if (cm < 0 && ct > 0) {          // SWAP — token in, MINIMA out
+                var dm2 = decSub(prev.m, p.reserveM), dt2 = decSub(p.reserveT, prev.t);
+                inserts.push({ pool: addr, label: label, kind: "SWAP", min: 0, m: dm2, t: dt2, price: decDiv(dt2, dm2, 12), ts: now });
+            } else if (cm > 0 && ct > 0) {          // ADD — both reserves up
+                inserts.push({ pool: addr, label: label, kind: "ADD", min: 1, m: decSub(p.reserveM, prev.m), t: decSub(p.reserveT, prev.t), price: "0", ts: now });
+            } else if (cm < 0 && ct < 0) {          // WITHDRAW (partial) — both reserves down
+                inserts.push({ pool: addr, label: label, kind: "WITHDRAW", min: 0, m: decSub(prev.m, p.reserveM), t: decSub(prev.t, p.reserveT), price: "0", ts: now });
             }
         }
-        for (var kk in snap) if (snap.hasOwnProperty(kk) && !seen[kk]) delete snap[kk];
+        // Only a scan that actually saw pools consumes the "first scan", so a fully-EMPTY first scan (node
+        // still connecting) can't make a pool first seen on scan 2 look brand-new. A partial first scan can
+        // still emit one phantom CREATE for a pool it missed — display-only, fresh-install-only, matches native.
+        if (seenCount > 0) PRIMED = true;
+        // Vanished pools → a real close (reserves fully drained; a once-seen pool stays discoverable via its
+        // tracked contract, so a vanish is a drain not a beacon-fade). 2-scan grace for a transient miss; skip
+        // the whole pass on the first scan (no wipe) and on an all-empty scan (systemic hiccup, no mass-close).
+        if (!firstScan && seenCount > 0) {
+            for (var kk in snap) {
+                if (!snap.hasOwnProperty(kk) || seen[kk]) continue;
+                var s = decSnap(snap[kk]);
+                if (!s) { delete snap[kk]; continue; }
+                if (s.miss + 1 >= MISS_CLOSE) {
+                    inserts.push({ pool: kk, label: s.label, kind: "WITHDRAW", min: 0, m: s.m, t: s.t, price: "0", ts: now });
+                    delete snap[kk];
+                } else {
+                    snap[kk] = encSnap(s.m, s.t, s.label, s.miss + 1);   // grace: keep one more scan
+                }
+            }
+        }
         saveSnap(snap);
         inserts.forEach(function (ev) {
-            MDS.sql("INSERT INTO pp_feed (pool, tokenlabel, minimain, minimaamt, tokenamt, price, ts) VALUES ('" +
-                esc(ev.pool) + "','" + esc(ev.label) + "'," + ev.min + ",'" + esc(ev.m) + "','" + esc(ev.t) + "','" + esc(ev.price) + "'," + ev.ts + ")");
+            MDS.sql("INSERT INTO pp_feed (pool, tokenlabel, kind, minimain, minimaamt, tokenamt, price, ts) VALUES ('" +
+                esc(ev.pool) + "','" + esc(ev.label) + "','" + ev.kind + "'," + ev.min + ",'" + esc(ev.m) + "','" + esc(ev.t) + "','" + esc(ev.price) + "'," + ev.ts + ")");
         });
         if (inserts.length) trimFeed();
     });
+}
+// Snapshot value = "m|t|miss|label" (label sanitized of '|'). Backward-compatible with the old "m|t" form.
+function sanitizeLabel(l) { return String(l == null ? "" : l).split("|").join("/"); }
+function encSnap(m, t, label, miss) { return m + "|" + t + "|" + miss + "|" + sanitizeLabel(label); }
+function decSnap(enc) {
+    if (enc === undefined || enc === null) return null;
+    var parts = String(enc).split("|");
+    if (parts.length < 2) return null;
+    return { m: parts[0], t: parts[1], miss: parts.length > 2 ? (parseInt(parts[2], 10) || 0) : 0, label: parts.length > 3 ? parts.slice(3).join("|") : "" };
 }
 function saveSnap(snap) {
     var v = esc(JSON.stringify(snap));

@@ -13,7 +13,7 @@
         <div class="hdr__logo">
             <span class="hdr__mark">◈</span>
             <span class="hdr__title">PandaPools</span>
-            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.1.8</span></span>
+            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.2.0</span></span>
         </div>
         <div class="hdr__wallet">
             <span class="hdr__style" onclick="App.cycleTheme()">◐ STYLE</span>
@@ -120,7 +120,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.1.8";
+var PANDAPOOLS_VERSION = "0.2.0";
 
 var App = (function () {
     var D = Decimal;
@@ -193,6 +193,11 @@ var App = (function () {
         Book.scan(function (pools) {
             scanning = false;
             POOLS = pools;
+            // Grow the personal-activity known-address set from every discovered pool (both 0x + Mx forms),
+            // persisted + never-shrink — so My Activity can keep matching a past swap on a pool that later closes.
+            var addrs = [];
+            pools.forEach(function (p) { if (p) { if (p.address) addrs.push(p.address); if (p.mxaddress) addrs.push(p.mxaddress); } });
+            Store.knownAddrsAdd(addrs);
             // The background service (service.js) is the SOLE global-feed ingester — it runs headless on every
             // NEWBLOCK whether the page is open or not, and owns pp_feed/pp_kv. The page only READS the feed
             // (renderGlobal → Store.feedList), so it must NOT ingest here or it would double-count swaps and
@@ -796,47 +801,84 @@ var App = (function () {
         // tokenid → label learned from the discovered pools, so an external on-chain swap names both legs
         var labels = { "0x00": "MINIMA" };
         POOLS.forEach(function (p) { if (p && p.tok) labels[p.tok] = PP.tokenLabel(p); });
-        MDS.cmd("history", function (j) {
-            var rows = "";
-            try {
-                var resp = j && j.response;
-                var txp = resp && resp.txpows;
-                var det = resp && resp.details;   // details[] carry per-tx `difference` — key by txpowid, not index
-                var diffById = {};
-                if (Array.isArray(det)) det.forEach(function (dd) {
-                    var id = dd && (dd.txpowid || (dd.txpow && dd.txpow.txpowid));
-                    if (id) diffById[String(id).toLowerCase()] = dd.difference;
-                });
-                var list = Array.isArray(txp) ? txp : (Array.isArray(det) ? det : (Array.isArray(resp) ? resp : []));
-                list.slice(0, 40).forEach(function (h, i) {
-                    var tp = h.txpow || h;
-                    var txid = (tp && tp.txpowid) || h.txpowid || "";
-                    var blk = (tp && tp.header && tp.header.block) || h.block || "";
-                    if (!txid) return;
-                    if (shownTx[txid.toLowerCase()]) return;   // already shown above as a local ActivityLog entry
-                    var diff = diffById[txid.toLowerCase()] || (h && h.difference) || null;
-                    var legs = swapLegs(diff, labels);
-                    if (legs) {
-                        rows += '<div class="row"><span class="row__glyph">⇄</span><div class="row__mid"><div class="row__l1">' + esc(legs) + '</div><div class="row__l2">on-chain swap · ' + esc(PP.shorten(txid)) + '</div></div><div class="row__r">#' + esc(String(blk)) + '</div></div>';
-                    } else {
-                        rows += '<div class="row"><span class="row__glyph">⟲</span><div class="row__mid"><div class="row__l1">' + esc(PP.shorten(txid)) + '</div><div class="row__l2">on-chain transaction</div></div><div class="row__r">#' + esc(String(blk)) + '</div></div>';
-                    }
-                });
-            } catch (e) {}
-            var html = prefix;
-            if (rows) html += '<div class="view__sub">Confirmed on-chain</div>' + rows;
-            if (!html) html = '<div class="empty">No activity yet.\nYour swaps, pool creates and withdrawals appear here.</div>';
-            el("actList").innerHTML = html;
+        // MY ACTIVITY = my PandaPools actions only. The node's `history` is the whole relevant wallet (plain
+        // sends, other dapps, strangers' swaps on pools I track), so keep only rows that touch a known pool
+        // covenant address AND moved my wallet (non-zero difference; a stranger swap nets to zero for me).
+        Store.knownAddrsGet(function (known) {
+            MDS.cmd("history", function (j) {
+                var rows = "";
+                try {
+                    var resp = j && j.response;
+                    var txp = resp && resp.txpows;
+                    // details[] is index-parallel to txpows[] and carries the per-tx `difference` map
+                    // ({tokenid: netAmount}). It has NO txpowid, so associate BY INDEX (not by id).
+                    var det = resp && resp.details;
+                    var list = Array.isArray(txp) ? txp : (Array.isArray(det) ? det : (Array.isArray(resp) ? resp : []));
+                    list.slice(0, 150).forEach(function (h, i) {
+                        var tp = h.txpow || h;
+                        var txid = (tp && tp.txpowid) || h.txpowid || "";
+                        var blk = (tp && tp.header && tp.header.block) || h.block || "";
+                        if (!txid) return;
+                        if (shownTx[txid.toLowerCase()]) return;   // already shown above as a local ActivityLog entry
+                        var diff = (Array.isArray(det) && det[i]) ? det[i].difference : ((h && h.difference) || null);
+                        if (!movedWallet(diff)) return;      // net-zero for me (stranger swap / reshuffle) → not mine
+                        if (!touchesPanda(tp, known)) return; // not a PandaPools txn (tp.body.txn carries addresses)
+                        var legs = swapLegs(diff, labels);
+                        if (legs) {
+                            rows += '<div class="row"><span class="row__glyph">⇄</span><div class="row__mid"><div class="row__l1">' + esc(legs) + '</div><div class="row__l2">on-chain swap · ' + esc(PP.shorten(txid)) + '</div></div><div class="row__r">#' + esc(String(blk)) + '</div></div>';
+                        } else {
+                            rows += '<div class="row"><span class="row__glyph">⟲</span><div class="row__mid"><div class="row__l1">' + esc(PP.shorten(txid)) + '</div><div class="row__l2">pool transaction</div></div><div class="row__r">#' + esc(String(blk)) + '</div></div>';
+                        }
+                    });
+                } catch (e) {}
+                var html = prefix;
+                if (rows) html += '<div class="view__sub">Confirmed on-chain</div>' + rows;
+                if (!html) html = '<div class="empty">No activity yet.\nYour swaps, pool creates and withdrawals appear here.</div>';
+                el("actList").innerHTML = html;
+            });
         });
+    }
+    // net non-zero effect on my wallet? a stranger's swap on a pool I track, or a self-reshuffle, nets to zero.
+    function movedWallet(diff) {
+        if (!diff || typeof diff !== "object") return false;
+        for (var tid in diff) { if (!diff.hasOwnProperty(tid)) continue; var v = parseDec(diff[tid]); if (v && !v.isZero()) return true; }
+        return false;
+    }
+    // does this txpow touch a known pool covenant address (in its inputs or outputs)?
+    function touchesPanda(tp, known) {
+        var txn = tp && tp.body && tp.body.txn; if (!txn) return false;
+        return addrHit(txn.inputs, known) || addrHit(txn.outputs, known);
+    }
+    function addrHit(coins, known) {
+        if (!Array.isArray(coins)) return false;
+        for (var i = 0; i < coins.length; i++) {
+            var c = coins[i]; if (!c) continue;
+            // check BOTH forms independently — the known set holds 0x + Mx, and either coin form may be absent
+            if (c.miniaddress && known[String(c.miniaddress).toLowerCase()]) return true;
+            if (c.address && known[String(c.address).toLowerCase()]) return true;
+        }
+        return false;
     }
     function renderGlobal() {
         Store.feedList(100, function (events) {
-            if (!events.length) { el("actList").innerHTML = '<div class="empty">No pool swaps seen yet.\nSwaps across all pools — including other people\'s — appear here as they happen.</div>'; return; }
-            var html = '<div class="view__sub">Live pool swaps</div>';
+            if (!events.length) { el("actList").innerHTML = '<div class="empty">No pool activity seen yet.\nPool creations, swaps and withdrawals across all pools — including other people\'s — appear here as they happen.</div>'; return; }
+            var html = '<div class="view__sub">Live pool activity</div>';
             events.forEach(function (ev) {
-                var m = trim6(ev.minimaAmt), t = trim6(ev.tokenAmt), tl = ev.tokenLabel;
-                var desc = ev.minimaIn ? ("Sold " + m + " MINIMA → " + t + " " + tl) : ("Bought " + m + " MINIMA ← " + t + " " + tl);
-                html += '<div class="row"><span class="row__glyph">⇄</span><div class="row__mid"><div class="row__l1">' + esc(desc) + '</div><div class="row__l2">' + trim6(ev.price) + " " + esc(tl) + "/MINIMA · " + esc(PP.shorten(ev.pool)) + " · " + rel(ev.ts) + '</div></div></div>';
+                var m = trim(ev.minimaAmt), t = trim8(ev.tokenAmt), tl = ev.tokenLabel;
+                var poolTime = esc(PP.shorten(ev.pool)) + " · " + rel(ev.ts);
+                var glyph, desc, line2;
+                if (ev.kind === "CREATE") {
+                    glyph = "✦"; desc = "New pool · " + m + " MINIMA / " + t + " " + tl; line2 = poolTime;
+                } else if (ev.kind === "ADD") {
+                    glyph = "+"; desc = "Liquidity added · +" + m + " MINIMA / +" + t + " " + tl; line2 = poolTime;
+                } else if (ev.kind === "WITHDRAW") {
+                    glyph = "−"; desc = "Withdrawn · " + m + " MINIMA / " + t + " " + tl; line2 = poolTime;
+                } else {   // SWAP
+                    glyph = "⇄";
+                    desc = ev.minimaIn ? ("Sold " + m + " MINIMA → " + t + " " + tl) : ("Bought " + m + " MINIMA ← " + t + " " + tl);
+                    line2 = trim6(ev.price) + " " + esc(tl) + "/MINIMA · " + poolTime;
+                }
+                html += '<div class="row"><span class="row__glyph">' + glyph + '</span><div class="row__mid"><div class="row__l1">' + esc(desc) + '</div><div class="row__l2">' + line2 + '</div></div></div>';
             });
             el("actList").innerHTML = html;
         });

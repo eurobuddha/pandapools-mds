@@ -15,7 +15,6 @@ var Store = (function () {
     var ready = false;
     var FEED_MAX = 100;
     var ACT_MAX = 120;
-    var primed = false;   // in-memory: first ingest of this session reseeds silently (no phantom swap)
 
     function esc(v) { return String(v).replace(/'/g, "''"); }
 
@@ -23,8 +22,18 @@ var Store = (function () {
     function init(cb) {
         // probe one table; only CREATE the set if missing (avoids pending prompts)
         MDS.sql("SELECT 1 FROM pp_activity LIMIT 1", function (r) {
-            if (r && r.status) { ready = true; if (cb) cb(); return; }
-            create(function () { ready = true; if (cb) cb(); });
+            function fin() { migrateFeedKind(function () { ready = true; if (cb) cb(); }); }
+            if (r && r.status) { fin(); return; }
+            create(fin);
+        });
+    }
+    // Add the lifecycle `kind` column to a pp_feed created by a pre-0.2.0 install (default SWAP so old rows
+    // render). The page and the headless service both run this; a duplicate ALTER from the loser errors
+    // harmlessly (swallowed). The SELECT succeeds once the column exists, so it's a one-time change either way.
+    function migrateFeedKind(cb) {
+        MDS.sql("SELECT kind FROM pp_feed LIMIT 1", function (r) {
+            if (r && r.status) { cb(); return; }
+            MDS.sql("ALTER TABLE pp_feed ADD COLUMN kind varchar(12) DEFAULT 'SWAP'", function () { cb(); });
         });
     }
 
@@ -51,6 +60,7 @@ var Store = (function () {
                     " `id` bigint auto_increment," +
                     " `pool` varchar(80) NOT NULL," +
                     " `tokenlabel` varchar(80) NOT NULL," +
+                    " `kind` varchar(12) NOT NULL DEFAULT 'SWAP'," +
                     " `minimain` int NOT NULL," +
                     " `minimaamt` varchar(90) NOT NULL," +
                     " `tokenamt` varchar(90) NOT NULL," +
@@ -152,84 +162,19 @@ var Store = (function () {
         return "Confirming " + Math.min(el, CONFIRM_BLOCKS) + "/" + CONFIRM_BLOCKS;
     }
 
-    // ---------------------------------------------------------------- GlobalFeed
-    function loadSnap(cb) {
-        MDS.sql("SELECT v FROM pp_kv WHERE k='snap'", function (r) {
-            var snap = {};
-            if (r && r.status && r.rows && r.rows.length) {
-                try { snap = JSON.parse(r.rows[0].V) || {}; } catch (e) { snap = {}; }
-            }
-            cb(snap);
-        });
-    }
-    function saveSnap(snap) {
-        var v = esc(JSON.stringify(snap));
-        MDS.sql("DELETE FROM pp_kv WHERE k='snap'", function () {
-            MDS.sql("INSERT INTO pp_kv (k, v) VALUES ('snap','" + v + "')");
-        });
-    }
-
-    /** Ingest a scan: detect swaps vs the last snapshot, append events, update the snapshot. */
-    function feedIngest(pools) {
-        if (!ready || !pools) return;
-        var firstScanThisSession = !primed;
-        primed = true;
-        loadSnap(function (snap) {
-            var seen = {};
-            var now = Date.now();
-            var inserts = [];
-            for (var i = 0; i < pools.length; i++) {
-                var p = pools[i];
-                if (!p || !p.address || !Curve.funded(p)) continue;
-                var addr = p.address.toLowerCase();
-                seen[addr] = true;
-                var prev = snap[addr];
-                var rm = PP.dec(p.reserveM), rt = PP.dec(p.reserveT);
-                snap[addr] = rm.toString() + "|" + rt.toString();
-                if (prev === undefined || firstScanThisSession) continue;   // seed only; never diff a stale snapshot
-                var bar = prev.indexOf("|");
-                if (bar < 0) continue;
-                var oldM, oldT;
-                try { oldM = PP.dec(prev.substring(0, bar)); oldT = PP.dec(prev.substring(bar + 1)); } catch (e) { continue; }
-                var cm = rm.cmp(oldM), ct = rt.cmp(oldT);
-                if (cm > 0 && ct < 0) {                        // MINIMA in, token out
-                    var dm1 = rm.minus(oldM), dt1 = oldT.minus(rt);
-                    inserts.push({ pool: addr, label: PP.tokenLabel(p), min: 1, m: dm1, t: dt1, price: price(dt1, dm1), ts: now });
-                } else if (cm < 0 && ct > 0) {                 // token in, MINIMA out
-                    var dm2 = oldM.minus(rm), dt2 = rt.minus(oldT);
-                    inserts.push({ pool: addr, label: PP.tokenLabel(p), min: 0, m: dm2, t: dt2, price: price(dt2, dm2), ts: now });
-                }
-                // both-up (deposit/migrate) or both-down: not a swap → ignore
-            }
-            // drop snapshots for vanished (closed) pools so a re-created address counts as new
-            for (var k in snap) if (snap.hasOwnProperty(k) && !seen[k]) delete snap[k];
-            saveSnap(snap);
-            inserts.forEach(function (ev) {
-                MDS.sql("INSERT INTO pp_feed (pool, tokenlabel, minimain, minimaamt, tokenamt, price, ts) VALUES ('" +
-                    esc(ev.pool) + "','" + esc(ev.label) + "'," + ev.min + ",'" + esc(PP.amt(ev.m)) + "','" +
-                    esc(PP.amt(ev.t)) + "','" + esc(PP.amt(ev.price)) + "'," + ev.ts + ")");
-            });
-            if (inserts.length) trimFeed();
-        });
-    }
-    function price(tok, minima) {
-        var mn = PP.dec(minima);
-        if (mn.isZero()) return new D(0);
-        return PP.dec(tok).div(mn);
-    }
-    function trimFeed() {
-        MDS.sql("SELECT id FROM pp_feed ORDER BY id DESC LIMIT 1 OFFSET " + FEED_MAX, function (r) {
-            if (r && r.status && r.rows && r.rows.length) MDS.sql("DELETE FROM pp_feed WHERE id <= " + (parseInt(r.rows[0].ID) || 0));
-        });
-    }
-    /** cb(events[]) newest first. Each: {pool,tokenLabel,minimaIn,minimaAmt,tokenAmt,price,ts}. */
+    // ---------------------------------------------------------------- GlobalFeed (READ ONLY here)
+    // The global feed (pp_feed / pp_kv snap) is WRITTEN solely by the background service (service.js), which
+    // runs headless on every NEWBLOCK — page + service must not both ingest or they'd double-count swaps and
+    // race the snapshot. The page only READS the feed for All Pools.
+    /** cb(events[]) newest first. Each: {pool,tokenLabel,kind,minimaIn,minimaAmt,tokenAmt,price,ts}. */
     function feedList(limit, cb) {
         if (!ready) { cb([]); return; }
         MDS.sql("SELECT * FROM pp_feed ORDER BY id DESC LIMIT " + (limit || FEED_MAX), function (r) {
             var out = [];
             if (r && r.status && r.rows) r.rows.forEach(function (row) {
                 out.push({
-                    pool: row.POOL, tokenLabel: row.TOKENLABEL, minimaIn: String(row.MINIMAIN) === "1",
+                    pool: row.POOL, tokenLabel: row.TOKENLABEL, kind: row.KIND || "SWAP",
+                    minimaIn: String(row.MINIMAIN) === "1",
                     minimaAmt: PP.decOr(row.MINIMAAMT, 0), tokenAmt: PP.decOr(row.TOKENAMT, 0),
                     price: PP.decOr(row.PRICE, 0), ts: parseInt(row.TS) || 0
                 });
@@ -238,11 +183,40 @@ var Store = (function () {
         });
     }
 
+    // -------------------------------------------------------- known PandaPools covenant addresses
+    // For the personal My-Activity filter: keep only on-chain rows that touch a pool covenant address AND moved
+    // my wallet. Grows on discovery + owned pools (both 0x and Mx forms, lowercased), PERSISTED, never shrinks
+    // (a past swap on a pool that has since closed must still match), and excludes the SENTINEL (so background
+    // re-announce dust beacons aren't surfaced as personal activity).
+    function knownAddrsGet(cb) {
+        if (!ready) { cb({}); return; }
+        MDS.sql("SELECT v FROM pp_kv WHERE k='knownaddrs'", function (r) {
+            var set = {};
+            if (r && r.status && r.rows && r.rows.length) {
+                try { (JSON.parse(r.rows[0].V) || []).forEach(function (a) { if (a) set[String(a).toLowerCase()] = true; }); } catch (e) {}
+            }
+            cb(set);
+        });
+    }
+    function knownAddrsAdd(addrs, cb) {
+        if (!ready || !addrs || !addrs.length) { if (cb) cb(); return; }
+        knownAddrsGet(function (set) {
+            var changed = false;
+            addrs.forEach(function (a) { if (a) { var k = String(a).toLowerCase(); if (!set[k]) { set[k] = true; changed = true; } } });
+            if (!changed) { if (cb) cb(); return; }
+            var arr = []; for (var k in set) if (set.hasOwnProperty(k)) arr.push(k);
+            var v = esc(JSON.stringify(arr));
+            MDS.sql("DELETE FROM pp_kv WHERE k='knownaddrs'", function () {
+                MDS.sql("INSERT INTO pp_kv (k, v) VALUES ('knownaddrs','" + v + "')", function () { if (cb) cb(); });
+            });
+        });
+    }
+
     return {
         init: init, isReady: function () { return ready; },
         lpRecord: lpRecord, lpUpdateFeeBase: lpUpdateFeeBase, lpRemove: lpRemove, lpGet: lpGet,
         actRecord: actRecord, actRecordFailed: actRecordFailed, actList: actList,
         confirmed: confirmed, statusText: statusText, CONFIRM_BLOCKS: CONFIRM_BLOCKS,
-        feedIngest: feedIngest, feedList: feedList
+        feedList: feedList, knownAddrsGet: knownAddrsGet, knownAddrsAdd: knownAddrsAdd
     };
 })();
