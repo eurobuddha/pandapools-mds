@@ -13,7 +13,7 @@
         <div class="hdr__logo">
             <span class="hdr__mark">◈</span>
             <span class="hdr__title">PandaPools</span>
-            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.1.5</span></span>
+            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.1.8</span></span>
         </div>
         <div class="hdr__wallet">
             <span class="hdr__style" onclick="App.cycleTheme()">◐ STYLE</span>
@@ -103,7 +103,7 @@
     </section>
 
     <footer class="footer">
-        <span>PandaPools v0.1.1</span>
+        <span id="footVer">PandaPools</span>
         <span class="footer__sep">|</span>
         <span>constant-product AMM</span>
         <span class="footer__sep">|</span>
@@ -120,7 +120,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.1.7";
+var PANDAPOOLS_VERSION = "0.1.8";
 
 var App = (function () {
     var D = Decimal;
@@ -160,6 +160,7 @@ var App = (function () {
 
     function initApp() {
         el("verLabel").innerText = "v" + PANDAPOOLS_VERSION;
+        el("footVer").innerText = "PandaPools v" + PANDAPOOLS_VERSION;
         PoolMgr.setStatusHook(function (m) { setStatus(activeView === "mylp" ? "lpStatus" : "swapStatus", m, "warn"); });
         setupTabs();
         el("swapFlip").onclick = function () { minimaToToken = !minimaToToken; syncSwapLabels(); requote(); };
@@ -192,7 +193,10 @@ var App = (function () {
         Book.scan(function (pools) {
             scanning = false;
             POOLS = pools;
-            Store.feedIngest(pools);      // capture the global feed while the page is open too
+            // The background service (service.js) is the SOLE global-feed ingester — it runs headless on every
+            // NEWBLOCK whether the page is open or not, and owns pp_feed/pp_kv. The page only READS the feed
+            // (renderGlobal → Store.feedList), so it must NOT ingest here or it would double-count swaps and
+            // race the service on the snapshot. Pool discovery still feeds the live Swap/Pools/My LP views.
             renderActive();
         });
     }
