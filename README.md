@@ -6,6 +6,8 @@ This is the **MiniDapp edition** of PandaPools. It is a faithful port of the nat
 
 > **Status:** feature-complete at **v0.6.0** (full parity with native app 0.9.9). The remaining pre-release step is a live dust-lifecycle + interop test on a synced, funded classic node — see [Release status](#release-status).
 
+> ⚠️ **Development software — use at your own risk.** PandaPools is experimental, actively-developed software provided **AS IS**, without warranty of any kind. It builds and posts real on-chain transactions that move real funds; despite extensive testing and code review, bugs may exist. Test with small amounts first, keep your seed backed up, and only risk what you can afford to lose. Nothing here is financial advice. See the [MIT License](LICENSE).
+
 ---
 
 ## Contents
