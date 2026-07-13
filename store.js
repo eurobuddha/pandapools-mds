@@ -251,7 +251,7 @@ var Store = (function () {
         MDS.sql("DELETE FROM pp_ownpools WHERE address='" + a + "'", function () {
             MDS.sql("INSERT INTO pp_ownpools (address, mx, opk, oadr, tok, tdec, kmin, script) VALUES ('" +
                 a + "','" + esc(p.mxaddress || "") + "','" + esc(p.opk) + "','" + esc(p.oadr) + "','" +
-                esc(p.tok) + "'," + (parseInt(p.tokDecimals) || 8) + ",'" + esc(String(p.kmin)) + "','" + esc(script) + "')");
+                esc(p.tok) + "'," + (isNaN(parseInt(p.tokDecimals)) ? 8 : parseInt(p.tokDecimals)) + ",'" + esc(String(p.kmin)) + "','" + esc(script) + "')");
         });
     }
     /** cb(recipes[]) — each {address, mxaddress, opk, oadr, tok, tokDecimals, kmin, script}. */
@@ -262,7 +262,7 @@ var Store = (function () {
             if (r && r.status && r.rows) r.rows.forEach(function (row) {
                 out.push({
                     address: row.ADDRESS, mxaddress: row.MX || "", opk: row.OPK, oadr: row.OADR,
-                    tok: row.TOK, tokDecimals: parseInt(row.TDEC) || 8, kmin: row.KMIN, script: row.SCRIPT || ""
+                    tok: row.TOK, tokDecimals: (isNaN(parseInt(row.TDEC)) ? 8 : parseInt(row.TDEC)), kmin: row.KMIN, script: row.SCRIPT || ""
                 });
             });
             cb(out);

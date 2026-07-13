@@ -13,7 +13,7 @@
         <div class="hdr__logo">
             <span class="hdr__mark">◈</span>
             <span class="hdr__title">PandaPools</span>
-            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.3.0</span></span>
+            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.4.0</span></span>
         </div>
         <div class="hdr__wallet">
             <span class="hdr__style" onclick="App.cycleTheme()">◐ STYLE</span>
@@ -76,6 +76,7 @@
             <div class="kv"><span class="kv__k" id="lpSub">≈ value of both legs</span><span class="kv__v"></span></div>
         </div>
         <button class="btn btn--primary btn--full" onclick="App.openCreate()">+ Create a pool</button>
+        <button class="btn btn--ghost btn--full" onclick="App.openRecovery()">Back up / restore pools</button>
         <div id="lpStatus" class="status status--dim"></div>
         <div id="lpList"></div>
     </section>
@@ -120,7 +121,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.3.0";
+var PANDAPOOLS_VERSION = "0.4.0";
 
 var App = (function () {
     var D = Decimal;
@@ -1109,10 +1110,130 @@ var App = (function () {
         var close = openModal(title, body, null, [{ label: "OK", cls: "btn btn--primary", fn: function () { close(); } }]);
     }
 
+    // ================================================================ RECOVERY (Layers 3/4)
+    function openRecovery() {
+        var body = document.createElement("div");
+        var p = document.createElement("div"); p.className = "modal__desc";
+        p.innerText = "Keep your pools recoverable on any node. A backup is PUBLIC DATA ONLY (addresses + coin proofs) — it holds no seed or private key, so it can never move your funds; you still need your seed to withdraw.";
+        body.appendChild(p);
+        var close = openModal("Pool recovery", body, null, [
+            { label: "Back up my pools", cls: "btn btn--primary", fn: function () { close(); doBackup(); } },
+            { label: "Restore from backup", cls: "btn", fn: function () { close(); openRestore(); } },
+            { label: "How it works", cls: "btn", fn: function () { close(); showRecoveryGuide(); } },
+            { label: "Close", cls: "btn btn--ghost", fn: function () { close(); } }
+        ]);
+    }
+    // ---- backup: recipes + a fresh coinexport of each funded reserve coin → a portable JSON (native-compatible)
+    function doBackup() {
+        Store.ownAll(function (recipes) {
+            if (!recipes.length) { openInfo("Back up pools", "No pools to back up yet — create a pool first."); return; }
+            var funded = {};
+            POOLS.forEach(function (p) { if (p && mine(p) && Curve.funded(p) && p.address) funded[p.address.toLowerCase()] = p; });
+            var pools = [], pending = recipes.length;
+            recipes.forEach(function (r) {
+                var e = { addr: r.address || "", mx: r.mxaddress || "", opk: r.opk || "", oadr: r.oadr || "",
+                          tok: r.tok || "", dec: (r.tokDecimals == null ? 8 : r.tokDecimals), kmin: r.kmin || "0", script: r.script || "" };
+                pools.push(e);
+                var f = funded[(r.address || "").toLowerCase()];
+                if (f && f.coinidM && f.coinidT) {
+                    exportCoin(f.coinidM, function (cm) {
+                        if (cm) e.cm = cm;
+                        exportCoin(f.coinidT, function (ct) { if (ct) e.ct = ct; if (--pending === 0) finishBackup(pools); });
+                    });
+                } else if (--pending === 0) finishBackup(pools);
+            });
+        });
+    }
+    function exportCoin(coinid, cb) {
+        MDS.cmd("coinexport coinid:" + coinid, function (j) { var r = j ? j.response : null; cb(r && r.data ? r.data : ""); });
+    }
+    function finishBackup(pools) {
+        var json = JSON.stringify({ pandapools_backup: 1, pools: pools }, null, 2);
+        var body = document.createElement("div");
+        var p = document.createElement("div"); p.className = "modal__desc";
+        p.innerText = "Save this somewhere safe (a file, a note, cloud). To restore later, paste it into Restore on any device. Public data only — no seed.";
+        body.appendChild(p);
+        var ta = document.createElement("textarea");
+        ta.readOnly = true; ta.value = json;
+        ta.style.width = "100%"; ta.style.minHeight = "150px"; ta.style.fontFamily = "monospace"; ta.style.fontSize = "11px"; ta.style.marginTop = "6px";
+        body.appendChild(ta);
+        var dl = document.createElement("a");
+        dl.href = "data:application/json;charset=utf-8," + encodeURIComponent(json);
+        dl.download = "pandapools-backup.json";
+        dl.className = "btn btn--full"; dl.innerText = "⬇ Download backup file";
+        dl.style.display = "block"; dl.style.marginTop = "8px"; dl.style.textAlign = "center";
+        body.appendChild(dl);
+        var close = openModal("Your pool backup", body, function () { try { ta.focus(); ta.select(); } catch (e) {} }, [
+            { label: "Copy", cls: "btn btn--primary", fn: function () { try { ta.select(); document.execCommand("copy"); } catch (e) {} } },
+            { label: "Done", cls: "btn", fn: function () { close(); } }
+        ]);
+    }
+    // ---- restore: re-track + best-effort coin re-import + persist the recipe, on ANY node
+    function openRestore() {
+        var body = document.createElement("div");
+        var p = document.createElement("div"); p.className = "modal__desc";
+        p.innerText = "Paste a PandaPools backup (or load a .json file). This re-tracks your pools on THIS node and re-imports the reserve coins so you can withdraw again — even on a brand-new node.";
+        body.appendChild(p);
+        var fileIn = document.createElement("input"); fileIn.type = "file"; fileIn.accept = "application/json,.json"; fileIn.style.marginBottom = "8px"; fileIn.style.display = "block";
+        body.appendChild(fileIn);
+        var ta = document.createElement("textarea"); ta.placeholder = "…or paste backup JSON here";
+        ta.style.width = "100%"; ta.style.minHeight = "130px"; ta.style.fontFamily = "monospace"; ta.style.fontSize = "11px";
+        body.appendChild(ta);
+        var status = document.createElement("div"); status.className = "modal__note"; status.style.marginTop = "6px"; body.appendChild(status);
+        fileIn.onchange = function () {
+            var f = fileIn.files && fileIn.files[0]; if (!f) return;
+            var rd = new FileReader(); rd.onload = function () { ta.value = String(rd.result || ""); }; rd.readAsText(f);
+        };
+        var close = openModal("Restore pools", body, null, [
+            { label: "Cancel", cls: "btn btn--ghost", fn: function () { close(); } },
+            { label: "Restore", cls: "btn btn--primary", fn: function () { doRestore(ta.value, status); } }
+        ]);
+    }
+    function doRestore(json, statusEl) {
+        var root;
+        try { root = JSON.parse(json); } catch (e) { statusEl.innerText = "That doesn't look like a PandaPools backup (invalid JSON)."; return; }
+        var pools = root && root.pools;
+        if (!root || !root.pandapools_backup || !Array.isArray(pools) || !pools.length) { statusEl.innerText = "No PandaPools pools found in that backup."; return; }
+        statusEl.innerText = "Restoring " + pools.length + " pool" + (pools.length === 1 ? "" : "s") + "…";
+        var total = pools.length, fin = 0, ok = 0;
+        pools.forEach(function (e) {
+            restoreOne(e, function (good) {
+                if (good) ok++;
+                if (++fin === total) { statusEl.innerText = "Re-tracked " + ok + " of " + total + " pool" + (total === 1 ? "" : "s") + " — if your node prompts, approve the pending actions. Re-scanning…"; rescan(true); }
+            });
+        });
+    }
+    function restoreOne(e, cb) {
+        if (!e || !e.addr) { cb(false); return; }
+        Store.ownRecord({ address: e.addr, mxaddress: e.mx || "", opk: e.opk || "", oadr: e.oadr || "",
+                          tok: e.tok || "", tokDecimals: (e.dec == null ? 8 : e.dec), kmin: e.kmin || "0", covenantScript: e.script || "" });
+        Store.knownAddrsAdd([e.addr, e.mx]);
+        var script = (e.script && e.script.length) ? e.script
+                   : (e.opk && e.oadr && e.tok && e.kmin ? Covenant.script(e.opk, e.oadr, e.tok, e.kmin) : "");
+        if (!script) { cb(true); return; }   // recipe persisted; nothing more to re-track
+        MDS.cmd("newscript trackall:true script:" + Covenant.scriptArg(script), function () {
+            importCoin(e.cm, function () { importCoin(e.ct, function () { cb(true); }); });
+        });
+    }
+    function importCoin(data, next) {
+        if (!data) { next(); return; }
+        MDS.cmd("coinimport track:true data:" + data, function () { next(); });   // best-effort (proof may be stale/spent)
+    }
+    function showRecoveryGuide() {
+        openInfo("How pool recovery works",
+            "Your pools are recoverable at several levels:\n\n" +
+            "BELT — this app keeps a recipe for every pool you own (its covenant + params), so it can always find and re-track them.\n\n" +
+            "BRACES — on launch the background service re-tracks your pools, so a re-synced node rediscovers them automatically.\n\n" +
+            "SUSPENDERS — “Back up my pools” saves a file (recipe + coin proofs); “Restore” re-tracks and re-imports the coins on ANY node, even a brand-new one where the pool aged out.\n\n" +
+            "STRING (last resort) — your pools are locked to your Minima SEED (the covenant is SIGNEDBY your key). With your seed you can always resync a node and reclaim them.\n\n" +
+            "A backup is PUBLIC DATA ONLY — addresses and coin proofs, never your seed or keys. It cannot move funds; it only helps a node re-find and re-track your pools.");
+    }
+
     return {
         rescan: rescan, confirmSwap: confirmSwap,
         openCreate: openCreate, openAdd: openAdd, openMigrate: openMigrate, confirmClose: confirmClose, dismissPending: dismissPending,
-        copyAddr: copyAddr, setScope: setScope, gotoActivity: gotoActivity, cycleTheme: cycleTheme
+        copyAddr: copyAddr, setScope: setScope, gotoActivity: gotoActivity, cycleTheme: cycleTheme,
+        openRecovery: openRecovery
     };
 })();
 </script>
