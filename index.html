@@ -13,7 +13,7 @@
         <div class="hdr__logo">
             <span class="hdr__mark">◈</span>
             <span class="hdr__title">PandaPools</span>
-            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.4.0</span></span>
+            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.5.0</span></span>
         </div>
         <div class="hdr__wallet">
             <span class="hdr__style" onclick="App.cycleTheme()">◐ STYLE</span>
@@ -121,7 +121,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.4.0";
+var PANDAPOOLS_VERSION = "0.5.0";
 
 var App = (function () {
     var D = Decimal;
@@ -129,6 +129,8 @@ var App = (function () {
     var POOLS = [];
     var MY_KEYS = {};
     var ownBackfilled = {};   // addresses whose owned-pool recipe we've backfilled this session (avoid re-writing)
+    var reannounceChecked = false;   // Layer 5: only run the foreground faded-beacon check once per session
+    var ANNOUNCED = {};       // pool keys re-announced this session (never double-post a beacon before it confirms)
     var RECV_ADDR = "";
     var scanning = false, busy = false, posting = false;
     var activeView = "swap";
@@ -228,8 +230,36 @@ var App = (function () {
             // (renderGlobal → Store.feedList), so it must NOT ingest here or it would double-count swaps and
             // race the service on the snapshot. Pool discovery still feeds the live Swap/Pools/My LP views.
             renderActive();
+            maybeReannounce();   // Layer 5: refresh any of my faded discovery beacons (once/session)
         });
     }
+    // Layer 5 (foreground): re-post a fresh discovery beacon for any of MY funded pools whose beacon has faded
+    // from the recent registry window, so strangers' fresh nodes keep finding it. Once per session. Spends only
+    // a dust+fee from the wallet (PoolMgr.reannounce) — never a covenant coin, never adds spend authority.
+    function maybeReannounce() {
+        if (reannounceChecked) return;
+        var owned = POOLS.filter(function (p) { return p && mine(p) && Curve.funded(p) && p.opk && p.oadr && p.tok && p.kmin; });
+        if (!owned.length) return;   // wait for a scan that actually sees my pools before consuming the once-guard
+        reannounceChecked = true;
+        // recent-window sentinel scan — NEVER megammr:true (that pulls the whole accumulated beacon pile)
+        MDS.cmd("coins simplestate:true order:desc address:" + Covenant.SENTINEL, function (res) {
+            var present = {};
+            var coins = (res && res.status && Array.isArray(res.response)) ? res.response : [];
+            coins.forEach(function (c) {
+                var tok = Book.readState(c, 2), oadr = Book.readState(c, 3), opk = Book.readState(c, 4), kmin = Book.readState(c, 5);
+                if (tok && oadr && opk && kmin) present[annKey(opk, oadr, tok, kmin)] = true;
+            });
+            owned.forEach(function (p) {
+                var k = annKey(p.opk, p.oadr, p.tok, p.kmin);
+                if (present[k] || ANNOUNCED[k]) return;   // beacon still live, or already re-posted this session
+                ANNOUNCED[k] = true;
+                PoolMgr.reannounce(p, { ok: function () {}, fail: function () { delete ANNOUNCED[k]; } });
+            });
+        });
+    }
+    // Full beacon identity incl. oadr (port 3) — a forged beacon with my public opk/tok/kmin but a bogus oadr
+    // must NOT suppress my re-announce (it would point fresh nodes at a wrong-address covenant).
+    function annKey(opk, oadr, tok, kmin) { return (opk + "|" + oadr + "|" + tok + "|" + kmin).toLowerCase(); }
 
     function loadKeys(cb) {
         MDS.cmd("keys", function (res) {

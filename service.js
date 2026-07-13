@@ -18,6 +18,14 @@ var PRIMED = false;   // first ingest of this service session suppresses CREATE 
 var SESSION_SEEN = {}; // addresses seen at least once this service session — a pool's FIRST sighting only
                        // reseeds (never diffs a possibly-pre-restart snapshot), so no phantom events on restart
 var MISS_CLOSE = 2;    // consecutive scans a pool must be absent before it's emitted as a close/withdraw
+// Layer 5 (background re-announce) — keep faded discovery beacons alive while the page is closed.
+var ANNOUNCE_DUST = "0.000000001";   // the beacon dust amount (matches poolmgr.js)
+var VERSION_HEX = "0x505031";   // "PP1" (matches covenant.js / poolmgr addAnnounceState)
+var PRESENT_BEACONS = {};       // beacon identity keys in the recent registry window (rebuilt each scan)
+var ANN_SVC = {};               // keys re-announced this service session (no double-post before it confirms)
+var lastAnnTs = 0;              // throttle: last faded-beacon re-announce sweep
+var REANN_MS = 6 * 3600 * 1000; // sweep at most every 6h (beacons prune ~1 day; matches native's worker cadence)
+var annCounter = 0;
 
 // The covenant template, ONE line, byte-identical to PoolCovenant/covenant.js (0.5% fee = *5/1000).
 var TEMPLATE =
@@ -185,6 +193,7 @@ function migrateFeedKind(cb) {
 // ---------------------------------------------------------------- discovery (mirrors book.js, self-contained)
 function scan() {
     var params = {};   // "opk|tok|kmin" -> {opk,oadr,tok,kmin,script?}
+    PRESENT_BEACONS = {};   // rebuilt from this scan's recent-window sentinel coins
     MDS.cmd("scripts", function (sres) {
         try {
             var arr = (sres && sres.status && Array.isArray(sres.response)) ? sres.response : [];
@@ -203,6 +212,9 @@ function scan() {
                 var c = coins[j];
                 var t = readState(c, 2), o = readState(c, 3), pk = readState(c, 4), km = readState(c, 5);
                 if (!t || !o || !pk || !km) continue;
+                var abk = annKeySvc(pk, o, t, km);
+                PRESENT_BEACONS[abk] = true;   // Layer 5: this beacon is live in the window
+                delete ANN_SVC[abk];           // confirmed back → allow a fresh re-announce when it next fades
                 var key = pk + "|" + t + "|" + km;
                 if (!params[key]) params[key] = { opk: pk, oadr: o, tok: t, kmin: km };
             }
@@ -284,6 +296,83 @@ function done(pools) {
         }
     }
     ingestFeed(funded);
+    maybeReannounceSvc(funded);
+}
+
+// ---------------------------------------------------------------- Layer 5: background faded-beacon re-announce
+function annKeySvc(opk, oadr, tok, kmin) { return (opk + "|" + oadr + "|" + tok + "|" + kmin).toLowerCase(); }
+
+// For every pool I OWN (in pp_ownpools) that is currently funded but whose beacon has FADED from the recent
+// window, post ONE fresh beacon — so strangers' fresh nodes keep discovering it while the page is closed.
+// Throttled to every 6h. Owner-WALLET funded, change back, spends NO covenant coin (the pool address is
+// excluded from funding) and adds NO owner signature (sign auto only). Assumes the dapp has WRITE access
+// (a headless service can't drive an interactive pending-sign); on a read-only node the txncheck gate simply
+// never posts. NEVER queries megammr.
+function maybeReannounceSvc(funded) {
+    var now = Date.now();
+    if (now - lastAnnTs < REANN_MS) return;   // throttle
+    lastAnnTs = now;                          // stamp NOW → one sweep per interval regardless of outcome
+    var fundedByAddr = {};
+    funded.forEach(function (p) { if (p && p.address && isFunded(p)) fundedByAddr[p.address.toLowerCase()] = p; });
+    MDS.sql("SELECT * FROM pp_ownpools", function (r) {
+        if (!r || !r.status || !r.rows || !r.rows.length) return;
+        r.rows.forEach(function (row) {
+            var addr = row.ADDRESS ? String(row.ADDRESS).toLowerCase() : "";
+            if (!addr || !fundedByAddr[addr]) return;               // not currently funded → a closed pool must not be announced
+            if (!row.OPK || !row.OADR || !row.TOK || !row.KMIN) return;
+            var k = annKeySvc(row.OPK, row.OADR, row.TOK, row.KMIN);
+            if (PRESENT_BEACONS[k] || ANN_SVC[k]) return;           // beacon still live, or a re-announce already in flight
+            ANN_SVC[k] = true;   // in-flight guard (blocks a concurrent-sweep double-post); CLEARED on failure below,
+                                 // and cleared in scan() when the beacon reappears — so a later re-fade re-announces.
+            reannounceSvc({ address: fundedByAddr[addr].address, opk: row.OPK, oadr: row.OADR, tok: row.TOK, kmin: row.KMIN }, k);
+        });
+    });
+}
+
+function reannounceSvc(p, key) {
+    // On any failure, re-open the key so the NEXT sweep retries (a one-shot skip would defeat background upkeep).
+    // On success, ANN_SVC[key] stays set until the beacon confirms back into the window (scan() clears it then).
+    function giveUp(txid) { if (txid) MDS.cmd("txndelete id:" + txid, function () {}); delete ANN_SVC[key]; }
+    MDS.cmd("coins relevant:true sendable:true tokenid:0x00", function (res) {
+        var arr = (res && res.status && Array.isArray(res.response)) ? res.response : [];
+        var excl = p.address.toLowerCase(), best = null;
+        for (var i = 0; i < arr.length; i++) {                      // largest wallet MINIMA coin, never the covenant address
+            var c = arr[i]; if (!c || (c.address || "").toLowerCase() === excl) continue;
+            if (!best || decCmp(c.amount || "0", best.amount || "0") > 0) best = c;
+        }
+        if (!best || decCmp(best.amount || "0", ANNOUNCE_DUST) < 0) { giveUp(null); return; }   // no spare MINIMA → retry later
+        var txid = "ppannsvc_" + (Date.now()) + "_" + (++annCounter);
+        var cmds = ["txncreate id:" + txid, "txninput id:" + txid + " coinid:" + best.coinid];
+        cmds.push("txnoutput id:" + txid + " amount:" + ANNOUNCE_DUST + " address:" + SENTINEL + " storestate:true");
+        var change = decSub(best.amount, ANNOUNCE_DUST);
+        if (decCmp(change, "0") > 0) cmds.push("txnoutput id:" + txid + " amount:" + change + " address:" + best.address + " storestate:false");
+        cmds.push("txnstate id:" + txid + " port:0 value:" + p.opk);
+        cmds.push("txnstate id:" + txid + " port:1 value:" + VERSION_HEX);
+        cmds.push("txnstate id:" + txid + " port:2 value:" + p.tok);
+        cmds.push("txnstate id:" + txid + " port:3 value:" + p.oadr);
+        cmds.push("txnstate id:" + txid + " port:4 value:" + p.opk);
+        cmds.push("txnstate id:" + txid + " port:5 value:" + p.kmin);
+        cmds.push("txnsign id:" + txid + " publickey:auto");   // funding coin only — no $OPK, no covenant coin
+        cmds.push("txnbasics id:" + txid);
+        runCmds(cmds, 0, function (okChain) {
+            if (!okChain) { giveUp(txid); return; }
+            MDS.cmd("txncheck id:" + txid, function (rc) {
+                var resp = rc ? rc.response : null, v = resp ? resp.valid : null;
+                // gate exactly like poolmgr.finalize: valid.scripts (covenant verdict) + validamounts + valid.mmrproofs
+                if (!(v && truthy(v.scripts) && truthy(resp.validamounts) && truthy(v.mmrproofs))) { giveUp(txid); return; }
+                MDS.cmd("txnpost id:" + txid, function () { MDS.cmd("txndelete id:" + txid, function () {}); });   // posted → keep ANN_SVC[key] until the beacon reappears
+            });
+        });
+    });
+}
+
+// sequential command runner — abort (cb false) on the first non-success (matches poolmgr.js runChain)
+function runCmds(cmds, i, cb) {
+    if (i >= cmds.length) { cb(true); return; }
+    MDS.cmd(cmds[i], function (res) {
+        if (!res || res.status !== true) { cb(false); return; }
+        runCmds(cmds, i + 1, cb);
+    });
 }
 
 // ---------------------------------------------------------------- GlobalFeed ingest (shares pp_feed / pp_kv)

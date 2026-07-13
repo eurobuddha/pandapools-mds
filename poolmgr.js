@@ -232,6 +232,28 @@ var PoolMgr = (function () {
         cmds.push("txnstate id:" + txid + " port:5 value:" + p.kmin);                // product floor
     }
 
+    // ================================================================ RE-ANNOUNCE (Layer 5)
+    // Post ONE fresh discovery beacon (dust → sentinel, params in state) for a pool whose beacon has faded from
+    // the recent registry window, so strangers' fresh nodes keep rediscovering it. Owner-WALLET funded, change
+    // back; spends NO covenant coin and adds NO owner signature (sign auto = funding coins only). The covenant
+    // reserves are untouched — this adds no spend authority.
+    function reannounce(p, done) {   // done.ok(txpowid), done.fail(msg)
+        if (!p || !p.address || !p.opk || !p.tok || !p.oadr || !p.kmin) { done.fail("incomplete pool record"); return; }
+        var excl = {}; excl[p.address.toLowerCase()] = true;   // never select a covenant coin
+        selectCoins(MINIMA, ANNOUNCE_DUST, excl, function (mfunds, msum) {
+            if (!mfunds) { done.fail("no spare MINIMA to re-announce"); return; }
+            var txid = "ppann_" + tag();
+            var cmds = ["txncreate id:" + txid];
+            mfunds.forEach(function (c) { cmds.push("txninput id:" + txid + " coinid:" + c.coinid); });
+            cmds.push("txnoutput id:" + txid + " amount:" + ANNOUNCE_DUST + " address:" + Covenant.SENTINEL + " storestate:true");
+            var chg = mfunds.length ? mfunds[0].address : p.oadr;
+            var change = msum.minus(PP.dec(ANNOUNCE_DUST));
+            if (change.gt(0)) cmds.push("txnoutput id:" + txid + " amount:" + PP.amt(change) + " address:" + chg + " storestate:false");
+            addAnnounceState(cmds, txid, p);
+            buildAndPost(txid, cmds, ["auto"], done);   // sign auto only = funding coins, no $OPK, no covenant coin
+        });
+    }
+
     // ================================================================ CREATE
     function createPool(tokenid, tokDecimals, x0Raw, y0Raw, done) {   // done.created(pool,txpowid), done.fail
         var x0 = PP.dec(x0Raw), y0 = PP.dec(y0Raw);
@@ -471,6 +493,7 @@ var PoolMgr = (function () {
         deposit: deposit,
         migrate: migrate,
         close: close,
-        swap: swap
+        swap: swap,
+        reannounce: reannounce
     };
 })();
