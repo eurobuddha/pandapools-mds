@@ -26,6 +26,8 @@ var ANN_SVC = {};               // keys re-announced this service session (no do
 var lastAnnTs = 0;              // throttle: last faded-beacon re-announce sweep
 var REANN_MS = 6 * 3600 * 1000; // sweep at most every 6h (beacons prune ~1 day; matches native's worker cadence)
 var annCounter = 0;
+var SCANNING = false, scanStartTs = 0;   // re-entrancy guard: one scan at a time (avoids the snap/feed race under
+                                         // NEWBLOCK bursts), with a 2-min stuck-guard so a dropped callback can't wedge it
 
 // The covenant template, ONE line, byte-identical to PoolCovenant/covenant.js (0.5% fee = *5/1000).
 var TEMPLATE =
@@ -192,6 +194,8 @@ function migrateFeedKind(cb) {
 
 // ---------------------------------------------------------------- discovery (mirrors book.js, self-contained)
 function scan() {
+    if (SCANNING && (Date.now() - scanStartTs) < 120000) return;   // one scan at a time (2-min stuck-guard)
+    SCANNING = true; scanStartTs = Date.now();
     var params = {};   // "opk|tok|kmin" -> {opk,oadr,tok,kmin,script?}
     PRESENT_BEACONS = {};   // rebuilt from this scan's recent-window sentinel coins
     MDS.cmd("scripts", function (sres) {
@@ -226,7 +230,7 @@ function scan() {
 function derive(params) {
     var list = [];
     for (var k in params) if (params.hasOwnProperty(k)) list.push(params[k]);
-    if (!list.length) return;
+    if (!list.length) { SCANNING = false; return; }
     var pools = [];
     var pending = list.length;
     function oneDone() { if (--pending === 0) fund(pools); }
@@ -250,7 +254,7 @@ function derive(params) {
 }
 
 function fund(pools) {
-    if (!pools.length) return;
+    if (!pools.length) { SCANNING = false; return; }
     var pending = pools.length;
     function oneDone() { if (--pending === 0) done(pools); }
     pools.forEach(function (pool) {
@@ -285,6 +289,7 @@ function short(s) { s = (s && s.indexOf("0x") === 0) ? s.substring(2) : (s || ""
 function isFunded(p) { return p.reserveM && p.reserveT && decCmp(p.reserveM, "0") > 0 && decCmp(p.reserveT, "0") > 0; }
 
 function done(pools) {
+    SCANNING = false;   // scan pipeline complete (this is the single terminal for a fully-run scan)
     var funded = [];
     for (var i = 0; i < pools.length; i++) {
         var p = pools[i];

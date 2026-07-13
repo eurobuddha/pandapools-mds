@@ -13,7 +13,7 @@
         <div class="hdr__logo">
             <span class="hdr__mark">◈</span>
             <span class="hdr__title">PandaPools</span>
-            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.5.0</span></span>
+            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.6.0</span></span>
         </div>
         <div class="hdr__wallet">
             <span class="hdr__style" onclick="App.cycleTheme()">◐ STYLE</span>
@@ -121,7 +121,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.5.0";
+var PANDAPOOLS_VERSION = "0.6.0";
 
 var App = (function () {
     var D = Decimal;
@@ -574,6 +574,22 @@ var App = (function () {
         var body = document.createElement("div");
         var mIn = field(body, "MINIMA to deposit", "e.g. 100");
         var tIn = field(body, t.name + " to deposit", "e.g. 0.56");
+        // Market-priced helper (parity with native's priced-create): for the USDT pair, fill the token side at
+        // the live MEXC price so the pool opens balanced at market (avoids arbitrage loss from a mispriced open).
+        if (t.name && t.name.toUpperCase().indexOf("USDT") >= 0) {
+            refreshMarket();   // freshen the MEXC mid for the helper
+            var mkBtn = document.createElement("button");
+            mkBtn.type = "button"; mkBtn.className = "btn btn--ghost btn--full"; mkBtn.style.marginBottom = "6px";
+            mkBtn.innerText = "Use MEXC market price";
+            mkBtn.onclick = function () {
+                var x = parseDec(mIn.value);
+                if (!x || x.lte(0)) { preview.innerText = "Enter the MINIMA amount first."; return; }
+                if (!marketFresh()) { preview.innerText = "Market price unavailable (MEXC) — set the amounts manually."; return; }
+                tIn.value = PP.fix(x.times(PP.dec(mktMid)), t.decimals);
+                update();
+            };
+            body.appendChild(mkBtn);
+        }
         var preview = document.createElement("div"); preview.className = "modal__note"; body.appendChild(preview);
         function update() {
             var x = parseDec(mIn.value), y = parseDec(tIn.value);
@@ -864,7 +880,10 @@ var App = (function () {
         // sends, other dapps, strangers' swaps on pools I track), so keep only rows that touch a known pool
         // covenant address AND moved my wallet (non-zero difference; a stranger swap nets to zero for me).
         Store.knownAddrsGet(function (known) {
-            MDS.cmd("history", function (j) {
+            // Bound the reply: unbounded `history` returns the node's whole relevant set (~2MB of contract-heavy
+            // txpows) and is re-fetched every render. max:50 keeps it light. (A persistent, adaptively-paged
+            // history store like native's HistoryDb/HistorySync is the full fix — tracked as deferred #67.)
+            MDS.cmd("history max:50", function (j) {
                 var rows = "";
                 try {
                     var resp = j && j.response;
