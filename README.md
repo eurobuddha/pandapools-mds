@@ -183,3 +183,9 @@ The code is feature-complete and every stage was code-reviewed. The final pre-st
 ## Version history
 
 See **[CHANGELOG.md](CHANGELOG.md)** and the [Releases](../../releases) page. In short: `v0.1.7` (initial MiniDapp) → `v0.6.0` (full parity with native 0.9.9), delivered over six review-gated stages (background-service feed authority, full-lifecycle Activity, and all five recovery layers).
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 eurobuddha. Provided **as is, without warranty** — see the disclaimer above. The bundled `decimal.js` is MIT-licensed (© Michael Mclaughlin) and retains its own notice.
