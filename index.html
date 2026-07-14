@@ -121,7 +121,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.1";
+var PANDAPOOLS_VERSION = "0.6.2";
 
 var App = (function () {
     var D = Decimal;
@@ -145,6 +145,10 @@ var App = (function () {
     var MKT_BOOK = "https://api.mexc.com/api/v3/ticker/bookTicker?symbol=MINIMAUSDT";
     var MKT_MIN_USDT = 25, MKT_FRESH_MS = 5 * 60000, MKT_GAP_MS = 30000;
     var mktMid = 0, mktAt = 0, mktFetching = false, mktLastTry = 0;
+    // Tokens with a live external market feed (currently only mxUSDT). ONLY these can be pooled, so a pool can
+    // never open at a mispriceable ratio while any reference price exists.
+    var USDT_TOKENID = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90";
+    function isMarketFed(tid) { return !!tid && tid.toLowerCase() === USDT_TOKENID.toLowerCase(); }
     // pending create guard
     var pendingCreate = null, pendingBlock = 0, pendingLabel = "";
 
@@ -553,67 +557,130 @@ var App = (function () {
             return;
         }
         MDS.cmd("balance", function (j) {
-            var toks = [];
+            var toks = [], minimaAvail = new D(0);
             var arr = (j && j.status && Array.isArray(j.response)) ? j.response : [];
             arr.forEach(function (t) {
                 var tid = t.tokenid || "";
-                if (PP.isMinima(tid)) return;
+                if (PP.isMinima(tid)) { minimaAvail = PP.decOr(t.sendable, 0); return; }   // MINIMA is the other leg
                 var sendable = PP.decOr(t.sendable, 0);
                 if (!tid || sendable.lte(0)) return;
+                if (!isMarketFed(tid)) return;   // ONLY market-fed pairs (mxUSDT) — no mispriceable pools
                 toks.push({ tokenid: tid, name: PP.tokenName(t.token, tid), decimals: PP.tokenDecimals(t.token), avail: sendable });
             });
-            if (!toks.length) { openInfo("No tokens to pool", "Your wallet holds no custom tokens. Receive some (e.g. mxUSDT) first, then create a MINIMA/token pool."); return; }
+            if (!toks.length) { openInfo("Get mxUSDT first", "PandaPools creates MINIMA / USDT pools — the pair with a live market price, so a pool always opens at the true rate. Your wallet holds no mxUSDT; receive some first, then create a pool."); return; }
+            if (toks.length === 1) { dispatchCreate(toks[0], minimaAvail); return; }
             var body = document.createElement("div");
             toks.forEach(function (t) {
                 var b = document.createElement("button");
                 b.className = "token-pick";
                 b.innerText = t.name + "  ·  " + trim(t.avail) + " avail";
-                b.onclick = function () { close(); createForm(t); };
+                b.onclick = function () { close(); dispatchCreate(t, minimaAvail); };
                 body.appendChild(b);
             });
             var close = openModal("Pool MINIMA with…", body, null);
         });
     }
-    function createForm(t) {
+    // opening-price anchor, best-first: (1) fresh MEXC mid; (2) aggregate spot of live USDT pools; else null.
+    function resolveAnchor() {
+        if (marketFresh() && mktMid > 0) return { price: PP.dec(mktMid), source: "MEXC market" };
+        var agg = Curve.aggregatePrice(POOLS.filter(function (p) { return p && isMarketFed(p.tok); }));
+        if (agg && agg.gt(0)) return { price: agg, source: "live pools" };
+        return null;
+    }
+    function dispatchCreate(t, minimaAvail) {
+        var a = resolveAnchor();
+        if (a) { createFormPriced(t, minimaAvail, a.price, a.source); return; }
+        // no cached MEXC and no live pool → try a MEXC fetch before falling to the manual bootstrap
+        setStatus("lpStatus", "Checking market price…", "dim");
+        var done = false;
+        function go() {
+            if (done) return; done = true;
+            setStatus("lpStatus", "", "dim");
+            var a2 = resolveAnchor();
+            if (a2) createFormPriced(t, minimaAvail, a2.price, a2.source);
+            else createFormManual(t);   // tier-3: no MEXC AND no live pool — user sets the first price
+        }
+        refreshMarket(go);
+        setTimeout(go, 12000);   // fallback: never hang if the net.GET callback never fires
+    }
+    // Tier 1/2 ANCHORED priced form: enter USD only; MINIMA is DERIVED from the anchor (no free ratio).
+    function createFormPriced(t, minimaAvail, initPrice, initSource) {
+        var price = initPrice, source = initSource;
         var body = document.createElement("div");
+        var uIn = field(body, t.name + " to provide  (≈ US$)", "e.g. 1.90");
+        var info = document.createElement("div"); info.className = "modal__note"; body.appendChild(info);
+        function update() {
+            if (!price || price.lte(0)) { info.innerText = "Fetching MINIMA/USDT market price…"; return; }
+            var cap = minimaAvail.times(price); if (t.avail.lt(cap)) cap = t.avail; cap = cap.toDP(t.decimals, D.ROUND_DOWN);
+            var s = "Price: " + trim8(price) + " USDT/MINIMA (" + source + ")\n";
+            s += "You have: " + trim(minimaAvail) + " MINIMA · " + trim(t.avail) + " " + t.name + "\n";
+            var u = parseDec(uIn.value);
+            if (!u || u.lte(0)) { s += "Enter the USDT amount to provide (max ≈ " + trim(cap) + ")."; }
+            else {
+                var minima = u.div(price).toDP(6, D.ROUND_UP);
+                s += "MINIMA required:  " + trim(minima) + "\nTotal pool value:  ≈ US$ " + trim(u.times(2));
+                if (minima.gt(minimaAvail)) s += "\n⚠ Not enough MINIMA — reduce USDT to ≤ " + trim(cap) + ".";
+                if (u.gt(t.avail)) s += "\n⚠ You only have " + trim(t.avail) + " " + t.name + ".";
+            }
+            info.innerText = s;
+        }
+        uIn.addEventListener("input", update);
+        var fetchCb = function () { if (marketFresh() && mktMid > 0) { price = PP.dec(mktMid); source = "MEXC market"; update(); } };
+        var close = openModal("Create MINIMA / " + t.name + " pool", body, function () { update(); refreshMarket(fetchCb); }, [
+            { label: "Cancel", cls: "btn", fn: function () { close(); } },
+            { label: "↻ Price", cls: "btn", fn: function () { info.innerText = "Refreshing price…"; refreshMarket(fetchCb); } },
+            { label: "Create", cls: "btn btn--primary", fn: function () {
+                if (!price || price.lte(0)) { info.innerText = "No price yet — tap ↻ and retry."; return; }
+                var u = parseDec(uIn.value);
+                if (!u || u.lte(0)) { info.innerText = "Enter the USDT amount."; return; }
+                var minima = u.div(price).toDP(6, D.ROUND_UP);
+                if (minima.gt(minimaAvail) || u.gt(t.avail)) { info.innerText = "Not enough balance for that amount."; return; }
+                close(); confirmCreate(t, minima, u, price, source, false);
+            } }
+        ]);
+    }
+    // Tier 3 BOOTSTRAP: reached ONLY when there is no MEXC price AND no live MINIMA/USDT pool (the first pool).
+    // The creator sets the opening price; gated behind an explicit acknowledgement + the confirm step.
+    function createFormManual(t) {
+        var body = document.createElement("div");
+        var intro = document.createElement("div"); intro.className = "modal__note";
+        intro.innerText = "No market price is available (MEXC is unreachable and there are no live MINIMA / " + t.name + " pools to match). You are setting the OPENING PRICE yourself — set it to the true market rate, or arbitrageurs will correct it at your expense.";
+        body.appendChild(intro);
         var mIn = field(body, "MINIMA to deposit", "e.g. 100");
         var tIn = field(body, t.name + " to deposit", "e.g. 0.56");
-        // Market-priced helper (parity with native's priced-create): for the USDT pair, fill the token side at
-        // the live MEXC price so the pool opens balanced at market (avoids arbitrage loss from a mispriced open).
-        if (t.name && t.name.toUpperCase().indexOf("USDT") >= 0) {
-            refreshMarket();   // freshen the MEXC mid for the helper
-            var mkBtn = document.createElement("button");
-            mkBtn.type = "button"; mkBtn.className = "btn btn--ghost btn--full"; mkBtn.style.marginBottom = "6px";
-            mkBtn.innerText = "Use MEXC market price";
-            mkBtn.onclick = function () {
-                var x = parseDec(mIn.value);
-                if (!x || x.lte(0)) { preview.innerText = "Enter the MINIMA amount first."; return; }
-                if (!marketFresh()) { preview.innerText = "Market price unavailable (MEXC) — set the amounts manually."; return; }
-                tIn.value = PP.fix(x.times(PP.dec(mktMid)), t.decimals);
-                update();
-            };
-            body.appendChild(mkBtn);
-        }
         var preview = document.createElement("div"); preview.className = "modal__note"; body.appendChild(preview);
+        var ackWrap = document.createElement("label"); ackWrap.style.display = "block"; ackWrap.style.margin = "6px 0"; ackWrap.style.fontSize = "12px";
+        var ack = document.createElement("input"); ack.type = "checkbox"; ack.style.marginRight = "6px";
+        ackWrap.appendChild(ack); ackWrap.appendChild(document.createTextNode("I understand I'm setting the opening price with no market to check it against."));
+        body.appendChild(ackWrap);
         function update() {
             var x = parseDec(mIn.value), y = parseDec(tIn.value);
             if (!x || !y || x.lte(0) || y.lte(0)) { preview.innerText = "Enter both amounts."; return; }
             if (!Covenant.sizeOk(x, y)) { preview.innerText = "Amounts too large (x × y must be < 2^64)."; return; }
             var yc = y.toDP(t.decimals, D.ROUND_DOWN);
-            var price = yc.div(x);
             var kmin; try { kmin = Covenant.kmin(x, yc); } catch (e) { preview.innerText = e.message; return; }
-            preview.innerText = "Opening price:  " + trim8(price) + " " + t.name + " / MINIMA\nProduct floor (KMIN):  " + kmin +
-                "\n⚠ You are setting this token's opening price. Match its real market price, or arbitrageurs will correct it at your expense.";
+            preview.innerText = "Opening price:  " + trim8(yc.div(x)) + " " + t.name + " / MINIMA\nProduct floor (KMIN):  " + kmin;
         }
         mIn.addEventListener("input", update); tIn.addEventListener("input", update); update();
         var close = openModal("Create MINIMA / " + t.name + " pool", body, null, [
             { label: "Cancel", cls: "btn", fn: function () { close(); } },
             { label: "Create", cls: "btn btn--primary", fn: function () {
                 var x = parseDec(mIn.value), y = parseDec(tIn.value);
-                if (!x || !y) { return; }
-                close(); doCreate(t, x, y);
+                if (!x || !y || x.lte(0) || y.lte(0)) { preview.innerText = "Enter both amounts."; return; }
+                if (!Covenant.sizeOk(x, y)) { preview.innerText = "Amounts too large (x × y must be < 2^64)."; return; }
+                if (!ack.checked) { preview.innerText = "Tick the box to confirm you're setting the price."; return; }
+                var yc = y.toDP(t.decimals, D.ROUND_DOWN);
+                close(); confirmCreate(t, x, y, yc.div(x), "manual", true);
             } }
         ]);
+    }
+    // Final confirmation — states amounts, opening price, and which anchor set it.
+    function confirmCreate(t, minima, usdt, price, source, bootstrap) {
+        var priceLine = bootstrap
+            ? "⚠ No market price available — YOU are setting the opening price."
+            : "Opens at " + trim8(price) + " USDT/MINIMA  (matches " + source + " ✓)";
+        var msg = "MINIMA / " + t.name + " pool\n\n" + trim(minima) + " MINIMA  +  " + trim(usdt) + " " + t.name + "\n" + priceLine + "\n\nThe 0.5% swap fee goes to liquidity providers.";
+        openConfirm("Create this pool?", msg, "Create", function () { doCreate(t, minima, usdt); });
     }
     function doCreate(t, x, y) {
         busy = true; setStatus("lpStatus", "Creating your MINIMA / " + t.name + " pool…", "dim");
@@ -1055,18 +1122,18 @@ var App = (function () {
         var m = (a + b) / 2;
         if (m > 0 && isFinite(m)) { mktMid = m; mktAt = Date.now(); }
     }
-    function refreshMarket() {
+    function refreshMarket(cb) {
         var now = Date.now();
-        if (mktFetching || now - mktLastTry < MKT_GAP_MS) return;
+        if (mktFetching || now - mktLastTry < MKT_GAP_MS) { if (cb) cb(); return; }   // rate-limited → proceed with cache
         mktFetching = true; mktLastTry = now;
         setTimeout(function () { mktFetching = false; }, 15000);   // guard: net.GET failure may not call back
         MDS.net.GET(MKT_DEPTH, function (res) {
             var j = netBody(res);
-            if (j && (j.bids || j.asks)) { acceptMid(effLevel(j.bids), effLevel(j.asks)); mktFetching = false; renderSwapMarket(); return; }
+            if (j && (j.bids || j.asks)) { acceptMid(effLevel(j.bids), effLevel(j.asks)); mktFetching = false; renderSwapMarket(); if (cb) cb(); return; }
             MDS.net.GET(MKT_BOOK, function (res2) {
                 var k = netBody(res2);
                 if (k) acceptMid(parseFloat(k.bidPrice), parseFloat(k.askPrice));
-                mktFetching = false; renderSwapMarket();
+                mktFetching = false; renderSwapMarket(); if (cb) cb();
             });
         });
     }
