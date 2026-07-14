@@ -25,6 +25,7 @@ var PRESENT_BEACONS = {};       // beacon identity keys in the recent registry w
 var ANN_SVC = {};               // keys re-announced this service session (no double-post before it confirms)
 var lastAnnTs = 0;              // throttle: last faded-beacon re-announce sweep
 var REANN_MS = 6 * 3600 * 1000; // sweep at most every 6h (beacons prune ~1 day; matches native's worker cadence)
+var MAX_ANN_PER_RUN = 8;        // gossip cap: one node re-posts at most this many faded beacons per sweep
 var annCounter = 0;
 var SCANNING = false, scanStartTs = 0;   // re-entrancy guard: one scan at a time (avoids the snap/feed race under
                                          // NEWBLOCK bursts), with a 2-min stuck-guard so a dropped callback can't wedge it
@@ -307,32 +308,34 @@ function done(pools) {
 // ---------------------------------------------------------------- Layer 5: background faded-beacon re-announce
 function annKeySvc(opk, oadr, tok, kmin) { return (opk + "|" + oadr + "|" + tok + "|" + kmin).toLowerCase(); }
 
-// For every pool I OWN (in pp_ownpools) that is currently funded but whose beacon has FADED from the recent
-// window, post ONE fresh beacon — so strangers' fresh nodes keep discovering it while the page is closed.
-// Throttled to every 6h. Owner-WALLET funded, change back, spends NO covenant coin (the pool address is
-// excluded from funding) and adds NO owner signature (sign auto only). Assumes the dapp has WRITE access
-// (a headless service can't drive an interactive pending-sign); on a read-only node the txncheck gate simply
-// never posts. NEVER queries megammr.
+// GOSSIP: for EVERY funded pool this node knows (its own + any it has discovered) whose beacon has FADED
+// from the recent window, post ONE fresh beacon — so a pool created on a now-offline node stays discoverable
+// to strangers' fresh nodes while its creator is away. Any node that has discovered a pool helps keep it
+// alive → self-healing mesh. Throttled to every 6h; shuffled + capped per run so many nodes don't all
+// re-beacon the same pools. Owner-WALLET funded, change back, spends NO covenant coin (the pool address is
+// excluded from funding) and adds NO owner signature (sign auto only) — safe to do for a stranger's pool.
+// Assumes the dapp has WRITE access; on a read-only node the txncheck gate simply never posts. NEVER megammr.
 function maybeReannounceSvc(funded) {
     var now = Date.now();
     if (now - lastAnnTs < REANN_MS) return;   // throttle
     lastAnnTs = now;                          // stamp NOW → one sweep per interval regardless of outcome
-    var fundedByAddr = {};
-    funded.forEach(function (p) { if (p && p.address && isFunded(p)) fundedByAddr[p.address.toLowerCase()] = p; });
-    MDS.sql("SELECT * FROM pp_ownpools", function (r) {
-        if (!r || !r.status || !r.rows || !r.rows.length) return;
-        r.rows.forEach(function (row) {
-            var addr = row.ADDRESS ? String(row.ADDRESS).toLowerCase() : "";
-            if (!addr || !fundedByAddr[addr]) return;               // not currently funded → a closed pool must not be announced
-            if (!row.OPK || !row.OADR || !row.TOK || !row.KMIN) return;
-            var k = annKeySvc(row.OPK, row.OADR, row.TOK, row.KMIN);
-            if (PRESENT_BEACONS[k] || ANN_SVC[k]) return;           // beacon still live, or a re-announce already in flight
-            ANN_SVC[k] = true;   // in-flight guard (blocks a concurrent-sweep double-post); CLEARED on failure below,
-                                 // and cleared in scan() when the beacon reappears — so a later re-fade re-announces.
-            reannounceSvc({ address: fundedByAddr[addr].address, opk: row.OPK, oadr: row.OADR, tok: row.TOK, kmin: row.KMIN }, k);
-        });
+    var faded = [];
+    funded.forEach(function (p) {
+        if (!p || !p.address || !p.opk || !p.oadr || !p.tok || !p.kmin || !isFunded(p)) return;   // funded only (never a closed pool)
+        var k = annKeySvc(p.opk, p.oadr, p.tok, p.kmin);
+        if (PRESENT_BEACONS[k] || ANN_SVC[k]) return;   // beacon still live, or a re-announce already in flight
+        faded.push({ p: p, k: k });
+    });
+    if (!faded.length) return;
+    shuffleArr(faded);
+    if (faded.length > MAX_ANN_PER_RUN) faded = faded.slice(0, MAX_ANN_PER_RUN);
+    faded.forEach(function (f) {
+        ANN_SVC[f.k] = true;   // in-flight guard; CLEARED on failure below, and cleared in scan() when the beacon
+                               // reappears — so a later re-fade re-announces.
+        reannounceSvc({ address: f.p.address, opk: f.p.opk, oadr: f.p.oadr, tok: f.p.tok, kmin: f.p.kmin }, f.k);
     });
 }
+function shuffleArr(a) { for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t; } }
 
 function reannounceSvc(p, key) {
     // On any failure, re-open the key so the NEXT sweep retries (a one-shot skip would defeat background upkeep).

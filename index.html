@@ -121,7 +121,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.0";
+var PANDAPOOLS_VERSION = "0.6.1";
 
 var App = (function () {
     var D = Decimal;
@@ -172,7 +172,7 @@ var App = (function () {
         Store.init(function () {
             MDS.cmd("block", function (r) { if (r.status && r.response) { CURRENT_BLOCK = parseInt(r.response.block) || 0; el("blockHeight").innerText = "#" + CURRENT_BLOCK; } });
             seedKnownFromOwn();
-            loadKeys(function () { refreshBalance(); refreshMarket(); loadRecvAddr(); rescan(true); });
+            loadKeys(function () { refreshBalance(); refreshMarket(); loadRecvAddr(); rescan(true); collectStuckOnLaunch(); });
         });
     }
     // Seed the known-address set from owned-pool recipes (both forms) so My Activity matches my own create/close
@@ -233,13 +233,15 @@ var App = (function () {
             maybeReannounce();   // Layer 5: refresh any of my faded discovery beacons (once/session)
         });
     }
-    // Layer 5 (foreground): re-post a fresh discovery beacon for any of MY funded pools whose beacon has faded
-    // from the recent registry window, so strangers' fresh nodes keep finding it. Once per session. Spends only
-    // a dust+fee from the wallet (PoolMgr.reannounce) — never a covenant coin, never adds spend authority.
+    // Layer 5 (foreground) GOSSIP: re-post a fresh discovery beacon for EVERY funded pool I know (mine +
+    // discovered) whose beacon has faded from the recent registry window — so a pool created on a now-offline
+    // node stays findable by fresh nodes. Once per session. Dust+fee send only (PoolMgr.reannounce) — never a
+    // covenant coin, never adds spend authority — so keeping a stranger's beacon alive is safe. Shuffle + cap
+    // per run so many nodes don't all re-beacon the same pools at once.
     function maybeReannounce() {
         if (reannounceChecked) return;
-        var owned = POOLS.filter(function (p) { return p && mine(p) && Curve.funded(p) && p.opk && p.oadr && p.tok && p.kmin; });
-        if (!owned.length) return;   // wait for a scan that actually sees my pools before consuming the once-guard
+        var funded = POOLS.filter(function (p) { return p && Curve.funded(p) && p.opk && p.oadr && p.tok && p.kmin; });
+        if (!funded.length) return;   // wait for a scan that actually sees pools before consuming the once-guard
         reannounceChecked = true;
         // recent-window sentinel scan — NEVER megammr:true (that pulls the whole accumulated beacon pile)
         MDS.cmd("coins simplestate:true order:desc address:" + Covenant.SENTINEL, function (res) {
@@ -249,9 +251,11 @@ var App = (function () {
                 var tok = Book.readState(c, 2), oadr = Book.readState(c, 3), opk = Book.readState(c, 4), kmin = Book.readState(c, 5);
                 if (tok && oadr && opk && kmin) present[annKey(opk, oadr, tok, kmin)] = true;
             });
-            owned.forEach(function (p) {
+            var faded = funded.filter(function (p) { var k = annKey(p.opk, p.oadr, p.tok, p.kmin); return !present[k] && !ANNOUNCED[k]; });
+            for (var i = faded.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = faded[i]; faded[i] = faded[j]; faded[j] = t; }
+            if (faded.length > 8) faded = faded.slice(0, 8);   // per-run gossip cap
+            faded.forEach(function (p) {
                 var k = annKey(p.opk, p.oadr, p.tok, p.kmin);
-                if (present[k] || ANNOUNCED[k]) return;   // beacon still live, or already re-posted this session
                 ANNOUNCED[k] = true;
                 PoolMgr.reannounce(p, { ok: function () {}, fail: function () { delete ANNOUNCED[k]; } });
             });
@@ -713,11 +717,49 @@ var App = (function () {
             "Withdraw", function () {
                 busy = true; setStatus("lpStatus", "Closing pool…", "dim");
                 var summary = "Withdraw MINIMA / " + tl + "  ·  " + trim(p.reserveM) + " MINIMA + " + trim(p.reserveT) + " " + tl + " back to wallet";
+                var closeOadr = p.oadr;
                 PoolMgr.close(p, {
-                    ok: function (txpowid) { Store.lpRemove(p.address); Store.actRecord("CLOSE", summary, txpowid, CURRENT_BLOCK); busy = false; setStatus("lpStatus", "Pool closed ✓ " + PP.shorten(txpowid) + " — funds returning (confirming on-chain).", "ok"); rescan(true); },
+                    ok: function (txpowid) {
+                        Store.lpRemove(p.address); Store.actRecord("CLOSE", summary, txpowid, CURRENT_BLOCK);
+                        busy = false;
+                        setStatus("lpStatus", "Pool closed ✓ " + PP.shorten(txpowid) + " — moving funds to a wallet address (confirming on-chain).", "ok");
+                        rescan(true);
+                        collectAfterClose(closeOadr, 8);   // second hop: forward $OADR → a default-64 wallet address once confirmed
+                    },
                     fail: function (msg) { Store.actRecordFailed("CLOSE", summary, msg); busy = false; setStatus("lpStatus", "Close failed: " + msg, "err"); }
                 });
             });
+    }
+
+    // After a close, the covenant→$OADR sweep is unconfirmed for ~a block; once it lands, forward those funds
+    // onward to a default-64 wallet address (so they survive a seed-only restore). Retries until the coins are
+    // sendable, or we run out of tries — the launch-time sweep (collectStuckOnLaunch) is the backstop.
+    function collectAfterClose(oadr, triesLeft) {
+        if (!oadr || triesLeft <= 0) return;
+        setTimeout(function () {
+            PoolMgr.forwardOwnerFunds(oadr, {
+                forwarded: function (txpowid, coins) { setStatus("lpStatus", "Withdrawn funds moved to your wallet ✓ " + PP.shorten(txpowid), "ok"); rescan(true); },
+                nothing: function () { collectAfterClose(oadr, triesLeft - 1); },
+                fail: function (msg) { collectAfterClose(oadr, triesLeft - 1); }
+            });
+        }, 20000);
+    }
+
+    // Fund-safety launch sweep: forward any funds stranded at owner addresses ($OADR) onward to default-64
+    // wallet addresses. No-op on a healthy node with nothing stranded (empty $OADR → no txn, no pending-sign
+    // prompt). Owner-KEY regeneration is NOT done here — it would mint keys every launch on a re-paired/
+    // different-seed node (and storm a restricted node with pending approvals); it runs only on explicit
+    // Restore instead. Runs once per session.
+    var collectedOnLaunch = false;
+    function collectStuckOnLaunch() {
+        if (collectedOnLaunch) return;
+        collectedOnLaunch = true;
+        Store.ownAll(function (recipes) {
+            if (!recipes || !recipes.length) return;
+            var oadrs = [];
+            recipes.forEach(function (r) { if (r.oadr) oadrs.push(r.oadr); });
+            PoolMgr.sweepOwnerFunds(oadrs, { swept: function (n, coins) { if (n > 0) rescan(true); } });
+        });
     }
 
     // ================================================================ WALLET
@@ -1166,11 +1208,27 @@ var App = (function () {
         p.innerText = "Keep your pools recoverable on any node. A backup is PUBLIC DATA ONLY (addresses + coin proofs) — it holds no seed or private key, so it can never move your funds; you still need your seed to withdraw.";
         body.appendChild(p);
         var close = openModal("Pool recovery", body, null, [
-            { label: "Back up my pools", cls: "btn btn--primary", fn: function () { close(); doBackup(); } },
+            { label: "Collect withdrawn funds", cls: "btn btn--primary", fn: function () { close(); doCollect(); } },
+            { label: "Back up my pools", cls: "btn", fn: function () { close(); doBackup(); } },
             { label: "Restore from backup", cls: "btn", fn: function () { close(); openRestore(); } },
             { label: "How it works", cls: "btn", fn: function () { close(); showRecoveryGuide(); } },
             { label: "Close", cls: "btn btn--ghost", fn: function () { close(); } }
         ]);
+    }
+    // ---- collect: forward any funds still sitting at my pool owner addresses ($OADR) → default-64 wallet
+    // addresses. Rescues funds a pre-fix close left stranded, so they survive a seed-only restore.
+    function doCollect() {
+        Store.ownAll(function (recipes) {
+            if (!recipes || !recipes.length) { openInfo("Collect withdrawn funds", "No pools on record to collect from."); return; }
+            var oadrs = [];
+            recipes.forEach(function (r) { if (r.oadr) oadrs.push(r.oadr); });
+            PoolMgr.sweepOwnerFunds(oadrs, { swept: function (n, coins) {
+                openInfo("Collect withdrawn funds", n > 0
+                    ? ("Moved withdrawn funds from " + n + " pool" + (n === 1 ? "" : "s") + " to your wallet.")
+                    : "Nothing to collect — no spendable funds are waiting at your pool payout addresses.");
+                if (n > 0) rescan(true);
+            } });
+        });
     }
     // ---- backup: recipes + a fresh coinexport of each funded reserve coin → a portable JSON (native-compatible)
     function doBackup() {
@@ -1248,7 +1306,17 @@ var App = (function () {
         pools.forEach(function (e) {
             restoreOne(e, function (good) {
                 if (good) ok++;
-                if (++fin === total) { statusEl.innerText = "Re-tracked " + ok + " of " + total + " pool" + (total === 1 ? "" : "s") + " — if your node prompts, approve the pending actions. Re-scanning…"; rescan(true); }
+                if (++fin === total) {
+                    // Regenerate any missing owner keys ($OPK) — a seed-only restore doesn't bring newaddress keys
+                    // back — so restored pools are actually closeable/collectable, not just re-tracked.
+                    var opks = pools.map(function (x) { return x && x.opk; }).filter(Boolean);
+                    PoolMgr.ensureOwnerKeys(opks, function (regen) {
+                        statusEl.innerText = "Re-tracked " + ok + " of " + total + " pool" + (total === 1 ? "" : "s")
+                            + (regen > 0 ? " (regenerated " + regen + " owner key" + (regen === 1 ? "" : "s") + ")" : "")
+                            + " — if your node prompts, approve the pending actions. Re-scanning…";
+                        rescan(true);
+                    });
+                }
             });
         });
     }

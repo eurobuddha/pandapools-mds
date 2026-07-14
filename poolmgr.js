@@ -434,6 +434,102 @@ var PoolMgr = (function () {
         });
     }
 
+    // ================================================================ FORWARD TO DEFAULT WALLET
+    // Forward every sendable coin at a pool owner address ($OADR) onward to a fresh DEFAULT-64 wallet address
+    // (getaddress). The covenant pins the owner exit to $OADR, so close can only land funds there; this second
+    // hop moves them into the 64 seed-derived defaults a seed-only restore always regenerates — so withdrawn
+    // funds are never stranded at a newaddress ($OADR) a bare seed restore wouldn't reproduce. $OADR is
+    // RETURN SIGNEDBY($OPK) and the node holds $OPK, so sign auto covers it. Full amounts (zero burn); whole
+    // coins move so token grain is exact. done.nothing() if nothing sendable yet (a close still confirming).
+    function forwardOwnerFunds(oadr, done) {   // done.forwarded(txpowid,coins), done.nothing(), done.fail(msg)
+        if (!oadr) { done.fail("no owner address"); return; }
+        MDS.cmd("coins relevant:true sendable:true address:" + oadr, function (res) {
+            var arr = (res && res.status && Array.isArray(res.response)) ? res.response : null;
+            if (!arr || !arr.length) { done.nothing(); return; }
+            var coinids = [], byTok = {}, order = [];
+            for (var i = 0; i < arr.length; i++) {
+                var c = arr[i];
+                if (!c || c.spent === true) continue;
+                var tid = c.tokenid || "", cid = c.coinid || "";
+                if (!tid || !cid) continue;
+                var a = coinAmt(c, tid);
+                if (a.lte(0)) continue;
+                coinids.push(cid);
+                if (byTok[tid] === undefined) { byTok[tid] = a; order.push(tid); }
+                else byTok[tid] = byTok[tid].plus(a);
+            }
+            if (!coinids.length) { done.nothing(); return; }
+            MDS.cmd("getaddress", function (j) {   // fresh DEFAULT-64 address (getaddress, not newaddress)
+                var dest = (j && j.response) ? (j.response.address || "") : "";
+                if (!dest) { done.fail("could not get a wallet address"); return; }
+                var txid = "ppfwd_" + tag();
+                var cmds = ["txncreate id:" + txid];
+                coinids.forEach(function (cid) { cmds.push("txninput id:" + txid + " coinid:" + cid); });
+                order.forEach(function (tid) {
+                    var tokArg = PP.isMinima(tid) ? "" : " tokenid:" + tid;
+                    cmds.push("txnoutput id:" + txid + " amount:" + PP.amt(byTok[tid]) + " address:" + dest + tokArg + " storestate:false");
+                });
+                var n = coinids.length;
+                buildAndPost(txid, cmds, ["auto"], {
+                    ok: function (txpowid) { done.forwarded(txpowid, n); },
+                    fail: done.fail
+                });
+            });
+        });
+    }
+
+    // "Collect to wallet" sweep across a set of owner addresses → default wallet addresses. Best-effort per
+    // address; reports totals. Dedups (migrate shares $OADR). Rescues funds a pre-fix close left at $OADR.
+    function sweepOwnerFunds(oadrs, done) {   // done.swept(addressesForwarded, coins)
+        var uniq = [], seen = {};
+        (oadrs || []).forEach(function (a) { if (a && !seen[a.toLowerCase()]) { seen[a.toLowerCase()] = true; uniq.push(a); } });
+        if (!uniq.length) { done.swept(0, 0); return; }
+        var pending = uniq.length, addrs = 0, coins = 0;
+        function tick() { if (--pending === 0) done.swept(addrs, coins); }
+        uniq.forEach(function (oadr) {
+            forwardOwnerFunds(oadr, {
+                forwarded: function (txpowid, n) { addrs++; coins += n; tick(); },
+                nothing: function () { tick(); },
+                fail: function (msg) { tick(); }
+            });
+        });
+    }
+
+    // ================================================================ OWNER-KEY RECOVERY
+    // $OPK is a `newaddress` key (index >= 64); a seed-only restore regenerates only the 64 default keys, so it
+    // doesn't bring $OPK back and the node can neither close its own open pools nor spend $OADR funds. Keys are
+    // derived deterministically as hash(seed, sequentialIndex), so re-issuing `newaddress` on the SAME seed
+    // reproduces the historical keys IN ORDER — create new addresses until each wanted pubkey reappears. No-op
+    // if the node already holds them (the normal case: the `keys` check finds them all).
+    var MAX_NEW_KEYS = 256;
+    function ensureOwnerKeys(wantedOpks, done) {   // done(regenerated)
+        var wanted = {}; var any = false;
+        (wantedOpks || []).forEach(function (o) { if (o) { wanted[o.toLowerCase()] = true; any = true; } });
+        if (!any) { done(0); return; }
+        MDS.cmd("keys", function (j) {
+            pubkeysOf(j).forEach(function (pk) { delete wanted[pk]; });
+            if (!Object.keys(wanted).length) { done(0); return; }   // node already holds every owner key — no-op
+            huntKeys(wanted, 0, 0, done);
+        });
+    }
+    function huntKeys(wanted, created, regenerated, done) {
+        if (!Object.keys(wanted).length || created >= MAX_NEW_KEYS) { done(regenerated); return; }
+        MDS.cmd("newaddress", function (j) {
+            var r = j ? j.response : null;
+            var pk = r && r.publickey ? String(r.publickey).toLowerCase() : "";
+            var reg = regenerated;
+            if (pk && wanted[pk]) { delete wanted[pk]; reg++; }
+            huntKeys(wanted, created + 1, reg, done);
+        });
+    }
+    function pubkeysOf(j) {
+        var out = [];
+        var resp = j ? j.response : null;
+        var arr = Array.isArray(resp) ? resp : (resp && Array.isArray(resp.keys) ? resp.keys : null);
+        if (arr) for (var i = 0; i < arr.length; i++) { var k = arr[i]; if (k && k.publickey) out.push(String(k.publickey).toLowerCase()); }
+        return out;
+    }
+
     // ================================================================ SWAP (routed)
     function swap(route, minimaToToken, done) {   // done.ok(txpowid), done.fail
         if (!route || !route.ok || !route.allocs.length) { done.fail("no route — trade too small for the pools"); return; }
@@ -494,6 +590,9 @@ var PoolMgr = (function () {
         migrate: migrate,
         close: close,
         swap: swap,
-        reannounce: reannounce
+        reannounce: reannounce,
+        forwardOwnerFunds: forwardOwnerFunds,
+        sweepOwnerFunds: sweepOwnerFunds,
+        ensureOwnerKeys: ensureOwnerKeys
     };
 })();
