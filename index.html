@@ -121,7 +121,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.3";
+var PANDAPOOLS_VERSION = "0.6.4";
 
 var App = (function () {
     var D = Decimal;
@@ -1014,10 +1014,12 @@ var App = (function () {
         // sends, other dapps, strangers' swaps on pools I track), so keep only rows that touch a known pool
         // covenant address AND moved my wallet (non-zero difference; a stranger swap nets to zero for me).
         Store.knownAddrsGet(function (known) {
-            // Bound the reply: unbounded `history` returns the node's whole relevant set (~2MB of contract-heavy
-            // txpows) and is re-fetched every render. max:50 keeps it light. (A persistent, adaptively-paged
-            // history store like native's HistoryDb/HistorySync is the full fix — tracked as deferred #67.)
-            MDS.cmd("history max:50", function (j) {
+            // Bound the reply HARD: a single contract-heavy txpow measured ~40 KB, and the node caps any reply at
+            // 256 KB (returns a "too long" stub → empty history), so max:50 (~2 MB) reliably came back EMPTY. max:4
+            // (~160 KB) stays safely under the cap. This mirrors native 0.9.14's small-first-page fix (native uses
+            // max:1 because it PAGES via HistoryDb/HistorySync; the MDS one-shot keeps a few rows). A persistent,
+            // adaptively-paged MDS history store is the full-parity fix — tracked as deferred #67.
+            MDS.cmd("history max:4", function (j) {
                 var rows = "";
                 try {
                     var resp = j && j.response;

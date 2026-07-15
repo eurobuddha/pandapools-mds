@@ -47,8 +47,9 @@ var Book = (function () {
 
     /** Scan the registry → discover + fund every pool → cb(pools). */
     function scan(cb) {
-        // idempotent: ensure the node notifies on sentinel coins, then gather from both sources.
-        MDS.cmd("coinnotify action:add address:" + SENTINEL, function () { gatherOwned(cb); });
+        // Straight to discovery — do NOT `coinnotify action:add` the sentinel (transient NOTIFYCOIN listener we
+        // never consume; discovery reads the recent chain via the depth-bounded scan below). Parity with native 0.9.14.
+        gatherOwned(cb);
     }
 
     function gatherOwned(cb) {
@@ -76,8 +77,11 @@ var Book = (function () {
     }
 
     function gatherRegistry(params, cb) {
-        // NO depth cap: an old depth limit made pools vanish from view hours after creation.
-        MDS.cmd("coins simplestate:true order:desc address:" + SENTINEL, function (res) {
+        // HARD depth:400 bound (parity with native 0.9.14). The unspendable sentinel's beacon pile is unbounded;
+        // an UNBOUNDED scan reply overflowed the native IPC (~312 KB) and on the node/MDS path trips the 256 KB
+        // "too long" stub → empty discovery. depth:400 keeps every live pool (freshest beacon <400 blocks) while
+        // capping the reply to a few KB. (An early depth:200 that made pools vanish was too tight, not wrong.)
+        MDS.cmd("coins simplestate:true order:desc depth:400 address:" + SENTINEL, function (res) {
             var coins = (res && res.status && Array.isArray(res.response)) ? res.response : [];
             for (var i = 0; i < coins.length; i++) {
                 var c = coins[i];
@@ -175,12 +179,10 @@ var Book = (function () {
             var p = pools[i];
             if (!Curve.funded(p)) continue;
             funded.push(p);
-            // Track-on-discovery: a newly-seen registry pool → permanently track its contract so it stays
-            // GTC-visible on this node. Fire-and-forget + idempotent (fires once per newly-discovered pool).
-            if (p.covenantScript) {
-                MDS.cmd("newscript trackall:true script:" + Covenant.scriptArg(p.covenantScript), function () {});
-                p.covenantScript = null;
-            }
+            // Track-on-discovery REMOVED (parity with native 0.9.14): it grew the node's tracked set — and hence
+            // the `scripts` reply (Source 1) — without bound, until that reply overflows the 256 KB cap. Pools
+            // already tracked stay visible; newly-seen pools stay discoverable via their fresh Source-2 beacon
+            // (kept alive by keep-fresh + the gossip mesh). Freezes `scripts` growth with no discovery loss.
         }
         cb(funded);
     }
