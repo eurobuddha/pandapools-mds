@@ -121,7 +121,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.2";
+var PANDAPOOLS_VERSION = "0.6.3";
 
 var App = (function () {
     var D = Decimal;
@@ -131,6 +131,9 @@ var App = (function () {
     var ownBackfilled = {};   // addresses whose owned-pool recipe we've backfilled this session (avoid re-writing)
     var reannounceChecked = false;   // Layer 5: only run the foreground faded-beacon check once per session
     var ANNOUNCED = {};       // pool keys re-announced this session (never double-post a beacon before it confirms)
+    var refreshChecked = false;      // keep-fresh: only run the foreground reserve-refresh check once per session
+    var REFRESHED = {};       // pool addresses refreshed this session (blocks a foreground/background double-fire)
+    var REFRESH_BLOCKS = 1200;       // recreate a reserve older than this (before the ~1700-block cascade edge; must match native)
     var RECV_ADDR = "";
     var scanning = false, busy = false, posting = false;
     var activeView = "swap";
@@ -235,6 +238,28 @@ var App = (function () {
             // race the service on the snapshot. Pool discovery still feeds the live Swap/Pools/My LP views.
             renderActive();
             maybeReannounce();   // Layer 5: refresh any of my faded discovery beacons (once/session)
+            maybeRefresh();      // keep-fresh: recreate MY aging reserves before they leave the cascade (once/session)
+        });
+    }
+    // KEEP-FRESH (foreground): for each of MY pools whose reserves are aging toward the ~1700-block cascade edge,
+    // recreate them in place (owner grow-in-place, same amounts + a fresh beacon) so they stay young and every light
+    // node keeps seeing them. Owner-signed, no fund movement (deposit(0)); once/session; shuffle+cap. Owner-only —
+    // spends the covenant, so gated to mine(). Mirrors native MyLpView.maybeRefresh / PoolRefresher.
+    function maybeRefresh() {
+        if (refreshChecked || !CURRENT_BLOCK) return;
+        var aging = POOLS.filter(function (p) {
+            if (!p || !mine(p) || !Curve.funded(p) || !p.address || REFRESHED[p.address.toLowerCase()]) return false;
+            var age = (p.reserveBlock > 0) ? (CURRENT_BLOCK - p.reserveBlock) : Infinity;   // unknown age → refresh
+            return age > REFRESH_BLOCKS;
+        });
+        if (!aging.length) return;
+        refreshChecked = true;
+        for (var i = aging.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = aging[i]; aging[i] = aging[j]; aging[j] = t; }
+        if (aging.length > 8) aging = aging.slice(0, 8);   // per-run cap (like re-announce)
+        aging.forEach(function (p) {
+            var a = p.address.toLowerCase();
+            REFRESHED[a] = true;
+            PoolMgr.refresh(p, { ok: function () {}, fail: function () { delete REFRESHED[a]; } });   // failed → allow retry
         });
     }
     // Layer 5 (foreground) GOSSIP: re-post a fresh discovery beacon for EVERY funded pool I know (mine +

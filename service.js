@@ -27,6 +27,14 @@ var lastAnnTs = 0;              // throttle: last faded-beacon re-announce sweep
 var REANN_MS = 6 * 3600 * 1000; // sweep at most every 6h (beacons prune ~1 day; matches native's worker cadence)
 var MAX_ANN_PER_RUN = 8;        // gossip cap: one node re-posts at most this many faded beacons per sweep
 var annCounter = 0;
+// KEEP-FRESH (background) — recreate MY pools' reserves in place before they leave the ~1700-block cascade.
+var REFRESH_BLOCKS = 1200;      // refresh a reserve older than this (before the 1700 edge; must match native + the page)
+var REFRESH_MS = 30 * 60 * 1000;// check for aging own pools at most every ~30min (the 1200→1700 window is ~7h wide)
+var lastRefreshTs = 0;
+var REFRESH_SVC = {};           // address -> ts of last refresh attempt; TTL-guarded so a double-fire is blocked
+var REFRESH_TTL_MS = 5 * 60 * 1000;   // ...while the refresh confirms (~2 blocks); far below the next real refresh (~19h)
+var MAX_REFRESH_PER_RUN = 8;
+var refreshCounter = 0;
 var SCANNING = false, scanStartTs = 0;   // re-entrancy guard: one scan at a time (avoids the snap/feed race under
                                          // NEWBLOCK bursts), with a 2-min stuck-guard so a dropped callback can't wedge it
 
@@ -245,7 +253,7 @@ function derive(params) {
                     pools.push({
                         opk: p.opk, oadr: p.oadr, tok: p.tok, kmin: p.kmin,
                         address: resp.script.address, covenantScript: tracked ? null : script,
-                        reserveM: null, reserveT: null
+                        reserveM: null, reserveT: null, coinidM: null, coinidT: null, reserveBlock: 0
                     });
                 }
             } catch (e) {}
@@ -261,18 +269,20 @@ function fund(pools) {
     pools.forEach(function (pool) {
         MDS.cmd("coins address:" + pool.address, function (j) {
             var cs = (j && j.status && Array.isArray(j.response)) ? j.response : [];
+            var mBlk = 0, tBlk = 0;   // created block of the kept coin per leg (for reserve age)
             for (var i = 0; i < cs.length; i++) {
                 var c = cs[i];
                 if (!c || c.spent === true) continue;
                 var tid = c.tokenid || "";
                 if (tid === "0x00") {
                     var m = c.amount || "0";
-                    if (pool.reserveM === null || decCmp(m, pool.reserveM) > 0) pool.reserveM = m;
+                    if (pool.reserveM === null || decCmp(m, pool.reserveM) > 0) { pool.reserveM = m; pool.coinidM = c.coinid || ""; mBlk = parseInt(c.created) || 0; }
                 } else if (pool.tok && pool.tok.toLowerCase() === tid.toLowerCase()) {
                     var t = (c.tokenamount !== undefined ? c.tokenamount : (c.amount || "0"));
-                    if (pool.reserveT === null || decCmp(t, pool.reserveT) > 0) { pool.reserveT = t; pool.tokLabel = labelOf(c.token, tid); }
+                    if (pool.reserveT === null || decCmp(t, pool.reserveT) > 0) { pool.reserveT = t; pool.coinidT = c.coinid || ""; tBlk = parseInt(c.created) || 0; pool.tokLabel = labelOf(c.token, tid); }
                 }
             }
+            pool.reserveBlock = Math.max(mBlk, tBlk);
             oneDone();
         });
     });
@@ -303,6 +313,7 @@ function done(pools) {
     }
     ingestFeed(funded);
     maybeReannounceSvc(funded);
+    maybeRefreshSvc(funded);
 }
 
 // ---------------------------------------------------------------- Layer 5: background faded-beacon re-announce
@@ -369,6 +380,89 @@ function reannounceSvc(p, key) {
                 // gate exactly like poolmgr.finalize: valid.scripts (covenant verdict) + validamounts + valid.mmrproofs
                 if (!(v && truthy(v.scripts) && truthy(resp.validamounts) && truthy(v.mmrproofs))) { giveUp(txid); return; }
                 MDS.cmd("txnpost id:" + txid, function () { MDS.cmd("txndelete id:" + txid, function () {}); });   // posted → keep ANN_SVC[key] until the beacon reappears
+            });
+        });
+    });
+}
+
+// ---------------------------------------------------------------- KEEP-FRESH (background): recreate MY aging reserves
+// For each of MY pools (pp_ownpools) whose reserves are aging toward the ~1700-block cascade edge, recreate them in
+// place (owner grow-in-place, same amounts + a fresh beacon — an owner-signed deposit(0)) so they stay young and every
+// light node keeps seeing + trading them. OWNER-ONLY (spends the covenant, needs $OPK) — unlike the node-wide beacon
+// gossip. Mirrors native PoolRefresher / the page's maybeRefresh. Assumes WRITE access (like the bg re-announce);
+// txncheck gate never posts on a read-only node. The page + service use separate in-context guards → at most a
+// duplicate refresh whose double-spent inputs are rejected at consensus (fund-safe).
+function maybeRefreshSvc(funded) {
+    var now = Date.now();
+    if (now - lastRefreshTs < REFRESH_MS) return;   // throttle
+    lastRefreshTs = now;
+    MDS.sql("SELECT address FROM pp_ownpools", function (r) {
+        var own = {};
+        if (r && r.status && r.rows) r.rows.forEach(function (row) { var a = row.ADDRESS; if (a) own[String(a).toLowerCase()] = true; });
+        if (!Object.keys(own).length) return;   // not an LP node → nothing of mine to refresh
+        MDS.cmd("block", function (bj) {
+            var tip = (bj && bj.status && bj.response) ? (parseInt(bj.response.block) || 0) : 0;
+            if (!tip) return;
+            var t = Date.now();
+            var aging = [];
+            funded.forEach(function (p) {
+                if (!p || !p.address || !p.opk || !p.oadr || !p.tok || !p.kmin || !p.coinidM || !p.coinidT || !isFunded(p)) return;
+                var a = p.address.toLowerCase();
+                if (!own[a]) return;                                        // only pools I own (can sign the covenant)
+                if (REFRESH_SVC[a] && (t - REFRESH_SVC[a]) < REFRESH_TTL_MS) return;   // already refreshing
+                var age = (p.reserveBlock > 0) ? (tip - p.reserveBlock) : Infinity;    // unknown age → refresh
+                if (age > REFRESH_BLOCKS) aging.push(p);
+            });
+            if (!aging.length) return;
+            shuffleArr(aging);
+            if (aging.length > MAX_REFRESH_PER_RUN) aging = aging.slice(0, MAX_REFRESH_PER_RUN);
+            aging.forEach(function (p) { REFRESH_SVC[p.address.toLowerCase()] = Date.now(); refreshSvc(p); });
+        });
+    });
+}
+
+function refreshSvc(p) {
+    var a = p.address.toLowerCase();
+    function giveUp(txid) { if (txid) MDS.cmd("txndelete id:" + txid, function () {}); delete REFRESH_SVC[a]; }   // allow a retry next sweep
+    // register the covenant (idempotent) so txnbasics can attach its script, then fund the beacon dust + build
+    MDS.cmd("newscript trackall:true script:" + scriptArg(covScript(p.opk, p.oadr, p.tok, p.kmin)), function () {
+        MDS.cmd("coins relevant:true sendable:true tokenid:0x00", function (res) {
+            var arr = (res && res.status && Array.isArray(res.response)) ? res.response : [];
+            var best = null;
+            for (var i = 0; i < arr.length; i++) {                          // largest wallet MINIMA coin, never the covenant address
+                var c = arr[i]; if (!c || (c.address || "").toLowerCase() === a) continue;
+                if (!best || decCmp(c.amount || "0", best.amount || "0") > 0) best = c;
+            }
+            if (!best || decCmp(best.amount || "0", ANNOUNCE_DUST) < 0) { giveUp(null); return; }   // no spare MINIMA → retry later
+            var tokArg = " tokenid:" + p.tok;
+            var txid = "pprefsvc_" + (Date.now()) + "_" + (++refreshCounter);
+            var cmds = ["txncreate id:" + txid];
+            cmds.push("txninput id:" + txid + " coinid:" + p.coinidM);   // 0 pool MINIMA (even)
+            cmds.push("txninput id:" + txid + " coinid:" + p.coinidT);   // 1 pool token  (odd)
+            cmds.push("txninput id:" + txid + " coinid:" + best.coinid); // beacon dust funding
+            // outputs 0/1 recreate the SAME reserves at the SAME address (owner grow branch; GTE holds at equality)
+            cmds.push("txnoutput id:" + txid + " amount:" + p.reserveM + " address:" + p.address + " storestate:false");
+            cmds.push("txnoutput id:" + txid + " amount:" + p.reserveT + " address:" + p.address + tokArg + " storestate:false");
+            cmds.push("txnoutput id:" + txid + " amount:" + ANNOUNCE_DUST + " address:" + SENTINEL + " storestate:true");   // fresh beacon
+            var change = decSub(best.amount, ANNOUNCE_DUST);
+            if (decCmp(change, "0") > 0) cmds.push("txnoutput id:" + txid + " amount:" + change + " address:" + best.address + " storestate:false");
+            cmds.push("txnstate id:" + txid + " port:0 value:" + p.opk);
+            cmds.push("txnstate id:" + txid + " port:1 value:" + VERSION_HEX);
+            cmds.push("txnstate id:" + txid + " port:2 value:" + p.tok);
+            cmds.push("txnstate id:" + txid + " port:3 value:" + p.oadr);
+            cmds.push("txnstate id:" + txid + " port:4 value:" + p.opk);
+            cmds.push("txnstate id:" + txid + " port:5 value:" + p.kmin);
+            cmds.push("txnsign id:" + txid + " publickey:auto");        // funding coin
+            cmds.push("txnsign id:" + txid + " publickey:" + p.opk);    // owner grow branch
+            cmds.push("txnbasics id:" + txid);
+            runCmds(cmds, 0, function (okChain) {
+                if (!okChain) { giveUp(txid); return; }
+                MDS.cmd("txncheck id:" + txid, function (rc) {
+                    var resp = rc ? rc.response : null, v = resp ? resp.valid : null;
+                    // gate exactly like the beacon path: valid.scripts (covenant verdict) + validamounts + valid.mmrproofs
+                    if (!(v && truthy(v.scripts) && truthy(resp.validamounts) && truthy(v.mmrproofs))) { giveUp(txid); return; }
+                    MDS.cmd("txnpost id:" + txid, function () { MDS.cmd("txndelete id:" + txid, function () {}); });   // posted → new coins are young → the aging gate stops a re-fire
+                });
             });
         });
     });

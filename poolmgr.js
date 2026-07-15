@@ -254,6 +254,42 @@ var PoolMgr = (function () {
         });
     }
 
+    // ================================================================ REFRESH (keep fresh in the cascade)
+    // Owner-signed KEEP-FRESH: recreate the two reserve coins IN PLACE — spend coinidM/coinidT and re-output the
+    // SAME amounts to the SAME covenant address (owner grow-in-place branch), plus a fresh beacon, one tx. New coin
+    // IDs (young → back inside the ~1700-block cascade → visible again to every light node's `coins address:X`, so
+    // cross-device discovery + swap work without megammr/server), but address/reserves/KMIN/identity unchanged and
+    // NOTHING burned. It's deposit(0). The covenant's GETOUTAMT GTE @AMOUNT makes a mis-build fail CLOSED. Owner-only
+    // (spends the covenant → needs $OPK), unlike the node-wide beacon re-announce. Mirrors native PoolManager.refresh.
+    function refresh(p, done) {   // done.ok(txpowid), done.fail
+        if (!Curve.funded(p) || !p.opk || !p.address || !p.tok || !p.oadr || !p.coinidM || !p.coinidT) {
+            done.fail("incomplete pool record"); return;
+        }
+        var tok = p.tok, tokArg = " tokenid:" + tok;
+        var excl = {}; excl[p.address.toLowerCase()] = true;   // never select a covenant coin as funding
+        ensureTracked(p, function () {
+            selectCoins(MINIMA, ANNOUNCE_DUST, excl, function (mfunds, msum) {   // tiny funding for the beacon dust
+                if (!mfunds) { done.fail("no spare MINIMA to refresh the pool"); return; }
+                var txid = "pprefresh_" + tag();
+                var cmds = ["txncreate id:" + txid];
+                cmds.push("txninput id:" + txid + " coinid:" + p.coinidM);   // 0 pool MINIMA (even)
+                cmds.push("txninput id:" + txid + " coinid:" + p.coinidT);   // 1 pool token  (odd)
+                mfunds.forEach(function (c) { cmds.push("txninput id:" + txid + " coinid:" + c.coinid); });
+                // outputs 0/1 recreate the SAME reserves at the SAME address (owner grow branch; GTE holds at equality)
+                cmds.push("txnoutput id:" + txid + " amount:" + PP.amt(PP.dec(p.reserveM)) + " address:" + p.address + " storestate:false");
+                cmds.push("txnoutput id:" + txid + " amount:" + PP.amt(PP.dec(p.reserveT)) + " address:" + p.address + tokArg + " storestate:false");
+                // fresh discovery beacon (dust at the sentinel, params in state)
+                cmds.push("txnoutput id:" + txid + " amount:" + ANNOUNCE_DUST + " address:" + Covenant.SENTINEL + " storestate:true");
+                // MINIMA change to the funding coin's own (non-owner) address — NOT $OADR (see buildCreate rationale)
+                var chg = mfunds.length ? mfunds[0].address : p.oadr;
+                var change = msum.minus(PP.dec(ANNOUNCE_DUST));
+                if (change.gt(0)) cmds.push("txnoutput id:" + txid + " amount:" + PP.amt(change) + " address:" + chg + " storestate:false");
+                addAnnounceState(cmds, txid, p);
+                buildAndPost(txid, cmds, ["auto", p.opk], done);   // sign auto (funding) + $OPK (owner grow branch)
+            });
+        });
+    }
+
     // ================================================================ CREATE
     function createPool(tokenid, tokDecimals, x0Raw, y0Raw, done) {   // done.created(pool,txpowid), done.fail
         var x0 = PP.dec(x0Raw), y0 = PP.dec(y0Raw);
@@ -591,6 +627,7 @@ var PoolMgr = (function () {
         close: close,
         swap: swap,
         reannounce: reannounce,
+        refresh: refresh,
         forwardOwnerFunds: forwardOwnerFunds,
         sweepOwnerFunds: sweepOwnerFunds,
         ensureOwnerKeys: ensureOwnerKeys

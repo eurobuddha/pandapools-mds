@@ -125,7 +125,8 @@ var Book = (function () {
                             // track it once confirmed funded (track-on-discovery).
                             covenantScript: tracked ? null : script,
                             tokName: null, tokDecimals: 8,
-                            reserveM: null, coinidM: null, reserveT: null, coinidT: null
+                            reserveM: null, coinidM: null, reserveT: null, coinidT: null,
+                            reserveBlock: 0   // created block of the reserve coins (keep-fresh age anchor; 0 = unknown)
                         });
                     }
                 } catch (e) {}
@@ -143,6 +144,7 @@ var Book = (function () {
         pools.forEach(function (pool) {
             MDS.cmd("coins address:" + pool.address, function (j) {
                 var cs = (j && j.status && Array.isArray(j.response)) ? j.response : [];
+                var mBlk = 0, tBlk = 0;   // created block of the kept coin per leg (for reserve age)
                 for (var i = 0; i < cs.length; i++) {
                     var c = cs[i];
                     if (!c || c.spent === true) continue;
@@ -150,17 +152,18 @@ var Book = (function () {
                     if (tid === "0x00") {
                         var amtM = PP.dec(c.amount || "0");
                         if (pool.reserveM === null || amtM.gt(pool.reserveM)) {   // keep the LARGEST (ignore forged dust)
-                            pool.reserveM = amtM; pool.coinidM = c.coinid || "";
+                            pool.reserveM = amtM; pool.coinidM = c.coinid || ""; mBlk = parseInt(c.created) || 0;
                         }
                     } else if (pool.tok && pool.tok.toLowerCase() === tid.toLowerCase()) {
                         var amtT = PP.dec(c.tokenamount !== undefined ? c.tokenamount : (c.amount || "0"));
                         if (pool.reserveT === null || amtT.gt(pool.reserveT)) {
-                            pool.reserveT = amtT; pool.coinidT = c.coinid || "";
+                            pool.reserveT = amtT; pool.coinidT = c.coinid || ""; tBlk = parseInt(c.created) || 0;
                             pool.tokName = PP.tokenName(c.token, tid);
                             pool.tokDecimals = PP.tokenDecimals(c.token);
                         }
                     }
                 }
+                pool.reserveBlock = Math.max(mBlk, tBlk);   // most-recent recreate = the pool's reserve age anchor
                 oneDone();
             });
         });
