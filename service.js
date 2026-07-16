@@ -27,8 +27,13 @@ var lastAnnTs = 0;              // throttle: last faded-beacon re-announce sweep
 var REANN_MS = 6 * 3600 * 1000; // sweep at most every 6h (beacons prune ~1 day; matches native's worker cadence)
 var MAX_ANN_PER_RUN = 8;        // gossip cap: one node re-posts at most this many faded beacons per sweep
 var annCounter = 0;
-// KEEP-FRESH (background) — recreate MY pools' reserves in place before they leave the ~1700-block cascade.
-var REFRESH_BLOCKS = 1200;      // refresh a reserve older than this (before the 1700 edge; must match native + the page)
+// PROACTIVE re-announce: re-post a beacon once it is older than this — BEFORE it leaves the depth:1500 discovery
+// window — so a live pool's beacon never lapses on any node (parity with native REANNOUNCE_DEPTH). Below the
+// discovery depth with margin, and below REFRESH_BLOCKS so an owner's own refresh usually pre-empts it.
+var REANNOUNCE_BLOCKS = 1000;
+// KEEP-FRESH (background) — recreate MY pools' reserves in place, keeping them young for every node's window.
+var REFRESH_BLOCKS = 900;       // refresh a reserve older than this (lowered 1200→900 so a short/resynced node's
+                                // window doesn't drop them first; must match native PoolRefresher.REFRESH_BLOCKS)
 var REFRESH_MS = 30 * 60 * 1000;// check for aging own pools at most every ~30min (the 1200→1700 window is ~7h wide)
 var lastRefreshTs = 0;
 var REFRESH_SVC = {};           // address -> ts of last refresh attempt; TTL-guarded so a double-fire is blocked
@@ -222,17 +227,20 @@ function scan() {
                 if (!params[k]) params[k] = { opk: opk, oadr: oadr, tok: tok, kmin: kmin, script: sc };
             }
         } catch (e) {}
-        // HARD depth:400 bound (parity with native 0.9.14) — the unspendable sentinel's beacon pile is unbounded;
-        // an unbounded reply trips the node's 256 KB "too long" stub → empty discovery. depth:400 keeps every live
-        // pool while capping the reply. Same window as the present-check → re-announce self-stabilises the window.
-        MDS.cmd("coins simplestate:true order:desc depth:400 address:" + SENTINEL, function (cres) {
+        // DISCOVERY depth bound (parity with native SENTINEL_SCAN_DEPTH) — bounded so a pathological pile can't
+        // overflow, but near the full ~1700 cascade (~20h) so a pool stays discoverable for its whole life, not
+        // just ~5.5h (the cross-device flicker fix). Safe now the coinnotify pile is removed (~8 KB unbounded).
+        // PRESENT_BEACONS records each beacon's newest `created` block so the PROACTIVE re-announce (below) can
+        // refresh a beacon once it passes REANNOUNCE_BLOCKS, BEFORE it leaves this wider window.
+        MDS.cmd("coins simplestate:true order:desc depth:1500 address:" + SENTINEL, function (cres) {
             var coins = (cres && cres.status && Array.isArray(cres.response)) ? cres.response : [];
             for (var j = 0; j < coins.length; j++) {
                 var c = coins[j];
                 var t = readState(c, 2), o = readState(c, 3), pk = readState(c, 4), km = readState(c, 5);
                 if (!t || !o || !pk || !km) continue;
                 var abk = annKeySvc(pk, o, t, km);
-                PRESENT_BEACONS[abk] = true;   // Layer 5: this beacon is live in the window
+                var cr = parseInt(c.created) || 0;
+                if (!PRESENT_BEACONS[abk] || cr > PRESENT_BEACONS[abk]) PRESENT_BEACONS[abk] = cr;   // newest beacon block
                 delete ANN_SVC[abk];           // confirmed back → allow a fresh re-announce when it next fades
                 var key = pk + "|" + t + "|" + km;
                 if (!params[key]) params[key] = { opk: pk, oadr: o, tok: t, kmin: km };
@@ -335,20 +343,27 @@ function maybeReannounceSvc(funded) {
     var now = Date.now();
     if (now - lastAnnTs < REANN_MS) return;   // throttle
     lastAnnTs = now;                          // stamp NOW → one sweep per interval regardless of outcome
-    var faded = [];
-    funded.forEach(function (p) {
-        if (!p || !p.address || !p.opk || !p.oadr || !p.tok || !p.kmin || !isFunded(p)) return;   // funded only (never a closed pool)
-        var k = annKeySvc(p.opk, p.oadr, p.tok, p.kmin);
-        if (PRESENT_BEACONS[k] || ANN_SVC[k]) return;   // beacon still live, or a re-announce already in flight
-        faded.push({ p: p, k: k });
-    });
-    if (!faded.length) return;
-    shuffleArr(faded);
-    if (faded.length > MAX_ANN_PER_RUN) faded = faded.slice(0, MAX_ANN_PER_RUN);
-    faded.forEach(function (f) {
-        ANN_SVC[f.k] = true;   // in-flight guard; CLEARED on failure below, and cleared in scan() when the beacon
-                               // reappears — so a later re-fade re-announces.
-        reannounceSvc({ address: f.p.address, opk: f.p.opk, oadr: f.p.oadr, tok: f.p.tok, kmin: f.p.kmin }, f.k);
+    MDS.cmd("block", function (bj) {
+        var tip = (bj && bj.status && bj.response) ? (parseInt(bj.response.block) || 0) : 0;
+        var faded = [];
+        funded.forEach(function (p) {
+            if (!p || !p.address || !p.opk || !p.oadr || !p.tok || !p.kmin || !isFunded(p)) return;   // funded only (never a closed pool)
+            var k = annKeySvc(p.opk, p.oadr, p.tok, p.kmin);
+            if (ANN_SVC[k]) return;                        // a re-announce already in flight
+            var bcreated = PRESENT_BEACONS[k];
+            // Re-announce if the beacon is ABSENT, or PROACTIVELY once it is older than REANNOUNCE_BLOCKS — BEFORE
+            // it would leave the depth:1500 discovery window (so it never lapses on any node). Unknown tip → skip.
+            if (bcreated && !(tip > 0 && (tip - bcreated) > REANNOUNCE_BLOCKS)) return;
+            faded.push({ p: p, k: k });
+        });
+        if (!faded.length) return;
+        shuffleArr(faded);
+        if (faded.length > MAX_ANN_PER_RUN) faded = faded.slice(0, MAX_ANN_PER_RUN);
+        faded.forEach(function (f) {
+            ANN_SVC[f.k] = true;   // in-flight guard; CLEARED on failure below, and cleared in scan() when the beacon
+                                   // reappears young — so a later re-fade re-announces.
+            reannounceSvc({ address: f.p.address, opk: f.p.opk, oadr: f.p.oadr, tok: f.p.tok, kmin: f.p.kmin }, f.k);
+        });
     });
 }
 function shuffleArr(a) { for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t; } }

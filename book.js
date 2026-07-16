@@ -77,11 +77,11 @@ var Book = (function () {
     }
 
     function gatherRegistry(params, cb) {
-        // HARD depth:400 bound (parity with native 0.9.14). The unspendable sentinel's beacon pile is unbounded;
-        // an UNBOUNDED scan reply overflowed the native IPC (~312 KB) and on the node/MDS path trips the 256 KB
-        // "too long" stub → empty discovery. depth:400 keeps every live pool (freshest beacon <400 blocks) while
-        // capping the reply to a few KB. (An early depth:200 that made pools vanish was too tight, not wrong.)
-        MDS.cmd("coins simplestate:true order:desc depth:400 address:" + SENTINEL, function (res) {
+        // DISCOVERY depth bound (parity with native SENTINEL_SCAN_DEPTH). Kept bounded so a pathological sentinel
+        // pile can't overflow, but set NEAR the full ~1700 cascade (~20h) so a pool stays discoverable for its
+        // whole life, not just ~5.5h — the cross-device flicker fix. Safe now that the coinnotify pile is removed:
+        // the sentinel reply measured ~8 KB even unbounded (13 beacons).
+        MDS.cmd("coins simplestate:true order:desc depth:1500 address:" + SENTINEL, function (res) {
             var coins = (res && res.status && Array.isArray(res.response)) ? res.response : [];
             for (var i = 0; i < coins.length; i++) {
                 var c = coins[i];

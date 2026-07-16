@@ -121,7 +121,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.5";
+var PANDAPOOLS_VERSION = "0.6.6";
 
 var App = (function () {
     var D = Decimal;
@@ -131,9 +131,10 @@ var App = (function () {
     var ownBackfilled = {};   // addresses whose owned-pool recipe we've backfilled this session (avoid re-writing)
     var reannounceChecked = false;   // Layer 5: only run the foreground faded-beacon check once per session
     var ANNOUNCED = {};       // pool keys re-announced this session (never double-post a beacon before it confirms)
+    var REANNOUNCE_BLOCKS = 1000;    // re-post a beacon once older than this, BEFORE it leaves the depth:1500 window (parity with native)
     var refreshChecked = false;      // keep-fresh: only run the foreground reserve-refresh check once per session
     var REFRESHED = {};       // pool addresses refreshed this session (blocks a foreground/background double-fire)
-    var REFRESH_BLOCKS = 1200;       // recreate a reserve older than this (before the ~1700-block cascade edge; must match native)
+    var REFRESH_BLOCKS = 900;        // recreate a reserve older than this (lowered 1200→900: a short/resynced node's window can be <1200; must match native PoolRefresher + service.js)
     var RECV_ADDR = "";
     var scanning = false, busy = false, posting = false;
     var activeView = "swap";
@@ -273,15 +274,25 @@ var App = (function () {
         var funded = POOLS.filter(function (p) { return p && Curve.funded(p) && p.opk && p.oadr && p.tok && p.kmin; });
         if (!funded.length) return;   // wait for a scan that actually sees pools before consuming the once-guard
         reannounceChecked = true;
-        // recent-window sentinel scan — NEVER megammr:true (that pulls the whole accumulated beacon pile)
-        MDS.cmd("coins simplestate:true order:desc address:" + Covenant.SENTINEL, function (res) {
+        // depth-bounded sentinel scan (never megammr:true) — same wide discovery window; records each beacon's
+        // newest block so the check is PROACTIVE (a beacon older than REANNOUNCE_BLOCKS counts as faded, before it
+        // would leave the window).
+        MDS.cmd("coins simplestate:true order:desc depth:1500 address:" + Covenant.SENTINEL, function (res) {
             var present = {};
             var coins = (res && res.status && Array.isArray(res.response)) ? res.response : [];
             coins.forEach(function (c) {
                 var tok = Book.readState(c, 2), oadr = Book.readState(c, 3), opk = Book.readState(c, 4), kmin = Book.readState(c, 5);
-                if (tok && oadr && opk && kmin) present[annKey(opk, oadr, tok, kmin)] = true;
+                if (tok && oadr && opk && kmin) {
+                    var k = annKey(opk, oadr, tok, kmin), cr = parseInt(c.created) || 0;
+                    if (!present[k] || cr > present[k]) present[k] = cr;
+                }
             });
-            var faded = funded.filter(function (p) { var k = annKey(p.opk, p.oadr, p.tok, p.kmin); return !present[k] && !ANNOUNCED[k]; });
+            var faded = funded.filter(function (p) {
+                var k = annKey(p.opk, p.oadr, p.tok, p.kmin);
+                if (ANNOUNCED[k]) return false;
+                var bcreated = present[k];
+                return !bcreated || (CURRENT_BLOCK > 0 && (CURRENT_BLOCK - bcreated) > REANNOUNCE_BLOCKS);
+            });
             for (var i = faded.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = faded[i]; faded[i] = faded[j]; faded[j] = t; }
             if (faded.length > 8) faded = faded.slice(0, 8);   // per-run gossip cap
             faded.forEach(function (p) {
