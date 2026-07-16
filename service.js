@@ -318,7 +318,7 @@ function done(pools) {
     }
     ingestFeed(funded);
     maybeReannounceSvc(funded);
-    maybeRefreshSvc(funded);
+    maybeRefreshSvc();   // sources its own owned pools from pp_ownpools (no longer the discovered set)
 }
 
 // ---------------------------------------------------------------- Layer 5: background faded-beacon re-announce
@@ -397,31 +397,63 @@ function reannounceSvc(p, key) {
 // gossip. Mirrors native PoolRefresher / the page's maybeRefresh. Assumes WRITE access (like the bg re-announce);
 // txncheck gate never posts on a read-only node. The page + service use separate in-context guards → at most a
 // duplicate refresh whose double-spent inputs are rejected at consensus (fund-safe).
-function maybeRefreshSvc(funded) {
+// Largest coin per leg at the covenant address = the true reserve (a dust coin can't masquerade); record the
+// newest kept-coin block for the reserve age. Same selection as the discovery fund() — mirrors native fillReserves.
+function fillReservesSvc(pool, j) {
+    var cs = (j && j.status && Array.isArray(j.response)) ? j.response : [];
+    var mBlk = 0, tBlk = 0;
+    for (var i = 0; i < cs.length; i++) {
+        var c = cs[i];
+        if (!c || c.spent === true) continue;
+        var tid = c.tokenid || "";
+        if (tid === "0x00") {
+            var m = c.amount || "0";
+            if (pool.reserveM === null || decCmp(m, pool.reserveM) > 0) { pool.reserveM = m; pool.coinidM = c.coinid || ""; mBlk = parseInt(c.created) || 0; }
+        } else if (pool.tok && pool.tok.toLowerCase() === tid.toLowerCase()) {
+            var t = (c.tokenamount !== undefined ? c.tokenamount : (c.amount || "0"));
+            if (pool.reserveT === null || decCmp(t, pool.reserveT) > 0) { pool.reserveT = t; pool.coinidT = c.coinid || ""; tBlk = parseInt(c.created) || 0; }
+        }
+    }
+    pool.reserveBlock = Math.max(mBlk, tBlk);
+}
+
+// KEEP-FRESH driven from the DURABLE pp_ownpools recipes + a per-covenant reserve scan — NOT the general
+// discovery set. So an owned pool is refreshed while it's still young enough even if the registry scan
+// momentarily didn't surface it (a discovery hiccup no longer lets a pool silently age out). Mirrors native
+// 0.9.14 PoolRefresher.refreshAgingFromScan reading OwnPoolStore. The refresh tx (refreshSvc) is unchanged.
+function maybeRefreshSvc() {
     var now = Date.now();
     if (now - lastRefreshTs < REFRESH_MS) return;   // throttle
     lastRefreshTs = now;
-    MDS.sql("SELECT address FROM pp_ownpools", function (r) {
-        var own = {};
-        if (r && r.status && r.rows) r.rows.forEach(function (row) { var a = row.ADDRESS; if (a) own[String(a).toLowerCase()] = true; });
-        if (!Object.keys(own).length) return;   // not an LP node → nothing of mine to refresh
+    MDS.sql("SELECT * FROM pp_ownpools", function (r) {
+        var recipes = (r && r.status && r.rows) ? r.rows : [];
+        if (!recipes.length) return;   // not an LP node → nothing of mine to refresh
         MDS.cmd("block", function (bj) {
             var tip = (bj && bj.status && bj.response) ? (parseInt(bj.response.block) || 0) : 0;
             if (!tip) return;
-            var t = Date.now();
-            var aging = [];
-            funded.forEach(function (p) {
-                if (!p || !p.address || !p.opk || !p.oadr || !p.tok || !p.kmin || !p.coinidM || !p.coinidT || !isFunded(p)) return;
+            var t = Date.now(), pending = recipes.length, aging = [];
+            function fire() {
+                if (--pending > 0) return;
+                if (!aging.length) return;
+                shuffleArr(aging);
+                if (aging.length > MAX_REFRESH_PER_RUN) aging = aging.slice(0, MAX_REFRESH_PER_RUN);
+                aging.forEach(function (p) { REFRESH_SVC[p.address.toLowerCase()] = Date.now(); refreshSvc(p); });
+            }
+            recipes.forEach(function (row) {
+                var p = { address: row.ADDRESS, opk: row.OPK, oadr: row.OADR, tok: row.TOK, kmin: row.KMIN,
+                          reserveM: null, reserveT: null, coinidM: null, coinidT: null, reserveBlock: 0 };
+                if (!p.address || !p.opk || !p.oadr || !p.tok || !p.kmin) { fire(); return; }
                 var a = p.address.toLowerCase();
-                if (!own[a]) return;                                        // only pools I own (can sign the covenant)
-                if (REFRESH_SVC[a] && (t - REFRESH_SVC[a]) < REFRESH_TTL_MS) return;   // already refreshing
-                var age = (p.reserveBlock > 0) ? (tip - p.reserveBlock) : Infinity;    // unknown age → refresh
-                if (age > REFRESH_BLOCKS) aging.push(p);
+                if (REFRESH_SVC[a] && (t - REFRESH_SVC[a]) < REFRESH_TTL_MS) { fire(); return; }   // already refreshing
+                MDS.cmd("coins address:" + p.address, function (j) {
+                    fillReservesSvc(p, j);
+                    if (isFunded(p) && p.coinidM && p.coinidT) {
+                        var age = (p.reserveBlock > 0) ? (tip - p.reserveBlock) : Infinity;   // unknown age → refresh
+                        if (age > REFRESH_BLOCKS) aging.push(p);
+                    }
+                    fire();
+                });
             });
-            if (!aging.length) return;
-            shuffleArr(aging);
-            if (aging.length > MAX_REFRESH_PER_RUN) aging = aging.slice(0, MAX_REFRESH_PER_RUN);
-            aging.forEach(function (p) { REFRESH_SVC[p.address.toLowerCase()] = Date.now(); refreshSvc(p); });
         });
     });
 }

@@ -22,9 +22,17 @@ var Store = (function () {
     function init(cb) {
         // probe one table; only CREATE the set if missing (avoids pending prompts)
         MDS.sql("SELECT 1 FROM pp_activity LIMIT 1", function (r) {
-            function fin() { migrateFeedKind(function () { ensureOwnPools(function () { ready = true; if (cb) cb(); }); }); }
+            function fin() { migrateFeedKind(function () { migrateActivityRefaddr(function () { ensureOwnPools(function () { ready = true; if (cb) cb(); }); }); }); }
             if (r && r.status) { fin(); return; }
             create(fin);
+        });
+    }
+    // Add the `refaddr` column (a CREATE's covenant address) to a pp_activity created before this build. Probe
+    // first so a normal run never issues the ALTER; a duplicate ALTER (page vs service race) errors harmlessly.
+    function migrateActivityRefaddr(cb) {
+        MDS.sql("SELECT refaddr FROM pp_activity LIMIT 1", function (r) {
+            if (r && r.status) { cb(); return; }
+            MDS.sql("ALTER TABLE pp_activity ADD COLUMN refaddr varchar(80)", function () { cb(); });
         });
     }
     // Ensure pp_ownpools exists for a pre-0.3.0 install (created before this table existed). Probe first so a
@@ -64,8 +72,9 @@ var Store = (function () {
                 " `summary` varchar(400) NOT NULL," +
                 " `txpowid` varchar(80)," +
                 " `submitblock` int NOT NULL," +
-                " `status` varchar(12) NOT NULL," +      // 'ok' | 'failed'
+                " `status` varchar(12) NOT NULL," +      // 'ok' | 'confirmed' | 'failed'
                 " `failmsg` varchar(400)," +
+                " `refaddr` varchar(80)," +              // a CREATE's covenant address (verified via its reserves)
                 " `ts` bigint NOT NULL)", function () {
                 MDS.sql(
                     "CREATE TABLE IF NOT EXISTS `pp_feed` (" +
@@ -140,11 +149,11 @@ var Store = (function () {
     }
 
     // ---------------------------------------------------------------- ActivityLog
-    function actRecord(type, summary, txpowid, submitBlock) {
+    function actRecord(type, summary, txpowid, submitBlock, refaddr) {
         if (!ready) return;
-        MDS.sql("INSERT INTO pp_activity (type, summary, txpowid, submitblock, status, failmsg, ts) VALUES ('" +
+        MDS.sql("INSERT INTO pp_activity (type, summary, txpowid, submitblock, status, failmsg, refaddr, ts) VALUES ('" +
             esc(type) + "','" + esc(summary) + "','" + esc(txpowid || "") + "'," + (parseInt(submitBlock) || 0) +
-            ",'ok','', " + Date.now() + ")", function () { trimActivity(); });
+            ",'ok','','" + esc(refaddr || "") + "', " + Date.now() + ")", function () { trimActivity(); });
     }
     function actRecordFailed(type, summary, failMsg) {
         if (!ready) return;
@@ -165,24 +174,42 @@ var Store = (function () {
                 out.push({
                     type: row.TYPE, summary: row.SUMMARY,
                     txpowid: row.TXPOWID || "", submitBlock: parseInt(row.SUBMITBLOCK) || 0,
-                    ts: parseInt(row.TS) || 0, failed: row.STATUS === "failed", failMsg: row.FAILMSG || ""
+                    ts: parseInt(row.TS) || 0, failed: row.STATUS === "failed", failMsg: row.FAILMSG || "",
+                    refaddr: row.REFADDR || "",                    // a CREATE's covenant address, for reserve verification
+                    confirmedOnchain: row.STATUS === "confirmed"   // verified: pool reserves landed on-chain
                 });
             });
             cb(out);
         });
     }
     var CONFIRM_BLOCKS = 3;
+    // A tx is "Confirmed" only once we've VERIFIED its effect landed on the main chain — one of its output coins
+    // exists in the UTXO set (set by verifyPendingActivity in index.html). Block-count alone is NOT enough: a tx
+    // can be mined then reorged out (esp. on a freshly-resynced node) and never re-mine, which used to show a
+    // false "Confirmed" for a pool that doesn't exist. Non-tx local notes (no txpowid) keep the old block/time rule.
     function confirmed(entry, chainBlock) {
         if (entry.failed) return false;
+        if (entry.confirmedOnchain) return true;   // verified: the pool's reserves are on-chain (set by the verifier)
+        // A CREATE with a stored covenant address must be VERIFIED against its reserves — block-count alone gave a
+        // false "Confirmed" for a create that was mined then reorged out (its covenant stays empty). The verifier
+        // (verifyPendingActivity) resolves it to confirmed/failed within ~12 blocks. Legacy creates (no refaddr)
+        // and every other action type keep the block/time rule (they don't create a phantom pool, and their output
+        // coins get spent so on-chain liveness is an unreliable signal for them).
+        if (entry.type === "CREATE" && entry.refaddr) return false;
         if (entry.submitBlock > 0 && chainBlock > 0) return (chainBlock - entry.submitBlock) >= CONFIRM_BLOCKS;
         return (Date.now() - entry.ts) > 4 * 60000;
     }
     function statusText(entry, chainBlock) {
         if (entry.failed) return "Failed";
         if (confirmed(entry, chainBlock)) return "Confirmed";
-        if (chainBlock <= 0 || entry.submitBlock <= 0) return "Submitted";
-        var el = Math.max(0, chainBlock - entry.submitBlock);
-        return "Confirming " + Math.min(el, CONFIRM_BLOCKS) + "/" + CONFIRM_BLOCKS;
+        return "Confirming…";
+    }
+    /** Verifier (index.html) marks an entry confirmed once an output landed, or failed if it never did. Only
+     *  touches still-'ok' rows so a resolved entry is never flipped back. */
+    function actSetStatus(txpowid, status, failMsg) {
+        if (!ready || !txpowid) return;
+        MDS.sql("UPDATE pp_activity SET status='" + esc(status) + "', failmsg='" + esc(failMsg || "") +
+            "' WHERE txpowid='" + esc(txpowid) + "' AND status='ok'");
     }
 
     // ---------------------------------------------------------------- GlobalFeed (READ ONLY here)
@@ -272,7 +299,7 @@ var Store = (function () {
     return {
         init: init, isReady: function () { return ready; },
         lpRecord: lpRecord, lpUpdateFeeBase: lpUpdateFeeBase, lpRemove: lpRemove, lpGet: lpGet,
-        actRecord: actRecord, actRecordFailed: actRecordFailed, actList: actList,
+        actRecord: actRecord, actRecordFailed: actRecordFailed, actList: actList, actSetStatus: actSetStatus,
         confirmed: confirmed, statusText: statusText, CONFIRM_BLOCKS: CONFIRM_BLOCKS,
         feedList: feedList, knownAddrsGet: knownAddrsGet, knownAddrsAdd: knownAddrsAdd,
         ownRecord: ownRecord, ownAll: ownAll
