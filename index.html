@@ -121,7 +121,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.6";
+var PANDAPOOLS_VERSION = "0.6.7";
 
 var App = (function () {
     var D = Decimal;
@@ -798,6 +798,8 @@ var App = (function () {
     function doMigrate(p, x, y) {
         busy = true; setStatus("lpStatus", "Migrating your pool…", "dim");
         var tl = PP.tokenLabel(p);
+        // Self-heal the owner key before the owner-signed migrate (see confirmClose) — no-op if already held.
+        PoolMgr.ensureOwnerKeys([p.opk], function () {
         PoolMgr.migrate(p, x, y, {
             created: function (np, txpowid) {
                 np.tokName = p.tokName;
@@ -809,6 +811,7 @@ var App = (function () {
                 busy = false; setStatus("lpStatus", "Migrated ✓ " + PP.shorten(txpowid) + " — confirming on-chain.", "ok"); rescan(true);
             },
             fail: function (msg) { Store.actRecordFailed("MIGRATE", "Migrate MINIMA / " + tl + " pool", msg); busy = false; setStatus("lpStatus", "Migrate failed: " + msg, "err"); }
+        });
         });
     }
 
@@ -822,6 +825,10 @@ var App = (function () {
                 busy = true; setStatus("lpStatus", "Closing pool…", "dim");
                 var summary = "Withdraw MINIMA / " + tl + "  ·  " + trim(p.reserveM) + " MINIMA + " + trim(p.reserveT) + " " + tl + " back to wallet";
                 var closeOadr = p.oadr;
+                // Self-heal the owner key first: $OPK is a newaddress key (index >= 64) a seed-only restore
+                // regenerates ASYNCHRONOUSLY — withdrawing too soon after a restore fails with "Public Key not
+                // found". ensureOwnerKeys is a no-op when the key is already held (a single extra keys check).
+                PoolMgr.ensureOwnerKeys([p.opk], function () {
                 PoolMgr.close(p, {
                     ok: function (txpowid) {
                         Store.lpRemove(p.address); Store.actRecord("CLOSE", summary, txpowid, CURRENT_BLOCK);
@@ -831,6 +838,7 @@ var App = (function () {
                         collectAfterClose(closeOadr, 8);   // second hop: forward $OADR → a default-64 wallet address once confirmed
                     },
                     fail: function (msg) { Store.actRecordFailed("CLOSE", summary, msg); busy = false; setStatus("lpStatus", "Close failed: " + msg, "err"); }
+                });
                 });
             });
     }
@@ -1390,12 +1398,17 @@ var App = (function () {
             if (!recipes || !recipes.length) { openInfo("Collect withdrawn funds", "No pools on record to collect from."); return; }
             var oadrs = [];
             recipes.forEach(function (r) { if (r.oadr) oadrs.push(r.oadr); });
+            // $OADR is RETURN SIGNEDBY($OPK) → the auto sweep still needs the owner key. Regenerate any missing
+            // owner keys first (no-op when already held) so an explicit Collect self-heals after a seed restore.
+            var opks = recipes.map(function (r) { return r.opk; }).filter(Boolean);
+            PoolMgr.ensureOwnerKeys(opks, function () {
             PoolMgr.sweepOwnerFunds(oadrs, { swept: function (n, coins) {
                 openInfo("Collect withdrawn funds", n > 0
                     ? ("Moved withdrawn funds from " + n + " pool" + (n === 1 ? "" : "s") + " to your wallet.")
                     : "Nothing to collect — no spendable funds are waiting at your pool payout addresses.");
                 if (n > 0) rescan(true);
             } });
+            });
         });
     }
     // ---- backup: recipes + a fresh coinexport of each funded reserve coin → a portable JSON (native-compatible)
