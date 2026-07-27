@@ -66,6 +66,10 @@
     <section id="view-pools" class="view">
         <h2 class="view__title">Live pools</h2>
         <p class="view__desc" id="poolsSummary">Scanning the pool registry…</p>
+        <div class="chip-row">
+            <span class="chip chip--active" id="poolsIndivChip" onclick="App.setPoolsMode('indiv')">Individual</span>
+            <span class="chip" id="poolsCombinedChip" onclick="App.setPoolsMode('combined')">Combined</span>
+        </div>
         <div id="poolList"></div>
     </section>
 
@@ -121,7 +125,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.7";
+var PANDAPOOLS_VERSION = "0.6.8";
 
 var App = (function () {
     var D = Decimal;
@@ -461,6 +465,34 @@ var App = (function () {
     }
 
     // ================================================================ POOLS
+    var poolsMode = "indiv";   // "indiv" = per-pool list | "combined" = one collective card per token (cosmetic view)
+    function setPoolsMode(m) {
+        poolsMode = m;
+        el("poolsIndivChip").classList.toggle("chip--active", m === "indiv");
+        el("poolsCombinedChip").classList.toggle("chip--active", m === "combined");
+        renderPools();
+    }
+    // Combined view: aggregate every pool of a token into ONE collective-pool card (summed reserves + aggregate
+    // price + pool count + tradeable depth). Reuses the SAME numbers the router already computes for swaps — no new
+    // pool math, no engine edit. Aggregates PER TOKEN (Router.byToken) since MINIMA/USDT can't be summed with another pair.
+    function renderPoolsCombined(host) {
+        var groups = Router.byToken(POOLS);   // funded pools grouped by token id, deepest pair first
+        if (!groups.length) { host.innerHTML = '<div class="card"><div class="card__title">No funded pools to combine yet.</div></div>'; return; }
+        var html = "";
+        groups.forEach(function (g) {
+            var tl = PP.tokenLabel(g[0]);
+            var totM = Curve.totalMinima(g);         // summed MINIMA side across the group's funded pools
+            var price = Curve.aggregatePrice(g);     // reserve-weighted token-per-MINIMA (the virtual-curve mid)
+            var totT = totM.times(price);            // summed token side = derived from the two exposed aggregates
+            var depth = Router.aggregateDepth(g);    // MINIMA depth actually routable (deepest MAX_POOLS)
+            html += '<div class="card card--accent"><div class="card__title">MINIMA / ' + esc(tl) + ' · combined</div>' +
+                kvRow("pools combined", String(g.length)) +
+                kvRow("total reserves", trim(totM) + " MINIMA · " + trim(totT) + " " + esc(tl)) +
+                kvRow("aggregate spot price", trim8(price) + " " + esc(tl) + " / MINIMA") +
+                kvRow("tradeable depth", trim(depth) + " MINIMA") + '</div>';
+        });
+        host.innerHTML = html;
+    }
     function renderPools() {
         var host = el("poolList");
         if (!POOLS.length) {
@@ -470,6 +502,7 @@ var App = (function () {
         }
         var agg = Curve.totalMinima(POOLS);
         el("poolsSummary").innerText = POOLS.length + (POOLS.length === 1 ? " pool" : " pools") + " · " + trim(agg) + " MINIMA aggregate depth";
+        if (poolsMode === "combined") { renderPoolsCombined(host); return; }
         var html = "";
         POOLS.forEach(function (p) {
             var tl = PP.tokenLabel(p);
@@ -1530,7 +1563,7 @@ var App = (function () {
     return {
         rescan: rescan, confirmSwap: confirmSwap,
         openCreate: openCreate, openAdd: openAdd, openMigrate: openMigrate, confirmClose: confirmClose, dismissPending: dismissPending,
-        copyAddr: copyAddr, copyText: copyText, setScope: setScope, gotoActivity: gotoActivity, cycleTheme: cycleTheme,
+        copyAddr: copyAddr, copyText: copyText, setScope: setScope, setPoolsMode: setPoolsMode, gotoActivity: gotoActivity, cycleTheme: cycleTheme,
         openRecovery: openRecovery
     };
 })();
