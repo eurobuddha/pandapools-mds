@@ -6,6 +6,47 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.8] — Pools tab: Individual | Combined view toggle
+
+- **Added** a toggle on the Pools tab: keep the per-pool list (**Individual**) or fold every pool of a token into **one collective-pool card** (**Combined**) — summed reserves + aggregate spot price + pool count + tradeable depth.
+- Display-only: reuses the router's own aggregation (`Router.byToken` + `Curve.totalMinima`/`aggregatePrice` + `Router.aggregateDepth`) — no new pool math, no covenant/txn change, engine files byte-identical.
+- Senior code-review: ship — numbers exact (`totalToken = totalMinima × aggregatePrice`), XSS-safe, counts consistent (discovery is funded-only). Released 3-way with native **0.9.17** + desktop **0.16.2**.
+
+## [0.6.7] — owner-key self-heal before Withdraw / Migrate / Close
+
+- **Fixed** a restore-then-manage fund scare: `$OPK` is a `newaddress` key (index ≥ 64) that a seed-only restore re-derives **asynchronously**, so acting before it finished could sign against a key the node didn't yet hold (`Public Key not found`). Close/Migrate/Collect now regenerate the owner key (a no-op when already held) **before** signing.
+- Glue/call-site only — `poolmgr.js` untouched, byte-identical to native/desktop. Parity with native **0.9.16** + desktop **0.8.3**.
+
+## [0.6.6] — discovery reliability tuning (parity with native 0.9.15)
+
+- **Fixed** a beacon-lapse **flicker** where a pool aged out of the tight sentinel window and vanished from non-owner nodes until the mesh re-announced it. Widened `SENTINEL_SCAN_DEPTH` **400 → 1500** (≈ a pool's whole ~20 h life).
+- **Added** proactive re-announce (`REANNOUNCE_DEPTH/BLOCKS = 1000`) — re-post a beacon *before* it leaves the discovery window. **Hard invariant:** discovery_depth > reannounce_depth + confirm-lag (1500 vs 1000).
+- **Changed** keep-fresh `REFRESH_BLOCKS` **1200 → 900** so reserves sit inside even a freshly-resynced node's short unpruned window.
+
+## [0.6.5] — honest create-confirmation + copyable txpowid
+
+- **Changed** a create shows **"Confirming…"** until its pool's covenant address actually holds **both** reserve legs on-chain (the durable signal), then latches **Confirmed**; a mined-then-reorged create is marked "Not confirmed — coins returned" instead of a misleading success.
+- **Added** a copyable txpowid on post; keep-fresh now reads `pp_ownpools` + per-covenant coins instead of a full sentinel scan.
+
+## [0.6.4] — bound the overflow-risk queries (parity with native 0.9.14)
+
+- **Fixed** the unbounded node queries that let discovery/history degrade to empty on a busy node: both sentinel scans → `depth:400`, `history max:50 → max:4` (~160 KB, under the cap), and **track-on-discovery removed** so the `scripts` reply can't grow.
+- Dropped the useless sentinel `coinnotify add` (+ one-time `remove`). Fund path (`poolmgr.js`) untouched.
+
+## [0.6.3] — keep pools fresh in the cascade (parity with native 0.9.12)
+
+- **Added** owner keep-fresh: every ~900 blocks (before the ~1700-block cascade edge) the owner recreates its pool's two reserve coins **in place** (grow-in-place, same amounts + fresh beacon, owner-signed = `deposit(0)`) → young coinids → back in the cascade so light nodes keep seeing + trading them.
+- Decentralized (no server, no `megammr`); zero burn; covenant `GETOUTAMT GTE @AMOUNT` fail-closed. Wired as the service's sole feed authority.
+
+## [0.6.2] — foolproof anchored MINIMA/USDT-only pool creation (native parity)
+
+- **Changed** create to the native app's price-anchored, **USDT-only** flow: fresh MEXC MINIMA/USDT mid → live-USDT-pool spot → manual; enter-USDT-only (MINIMA derived = usdt ÷ price); manual free-ratio only for the first pool — prevents opening a mispriced pool.
+
+## [0.6.1] — gossip discovery + withdraw-to-default + owner-key recovery (native parity)
+
+- **Added** two-source discovery (own tracked pool contracts, GTC + never-pruned, merged with fresh sentinel beacons), a `parseok` gate so a non-compiling covenant can't masquerade as a live pool, and track-on-discovery.
+- **Added** owner-key recovery on restore and withdraw-to-default-address, matching the native app's recovery model.
+
 ## [0.6.0] — Stage 5: parity complete (polish + final integration review)
 
 Feature parity with the native app is complete: 5 tabs, trust-nothing discovery, all four lifecycle transactions, scoped My Activity + full-lifecycle All Pools, and the full 5-layer pool recovery.
