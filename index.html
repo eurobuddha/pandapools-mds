@@ -81,6 +81,7 @@
         </div>
         <button class="btn btn--primary btn--full" onclick="App.openCreate()">+ Create a pool</button>
         <button class="btn btn--ghost btn--full" onclick="App.openRecovery()">Back up / restore pools</button>
+        <button class="btn btn--ghost btn--full" onclick="App.openStatement()">Export statement</button>
         <div id="lpStatus" class="status status--dim"></div>
         <div id="lpList"></div>
     </section>
@@ -123,9 +124,11 @@
 <script src="router.js"></script>
 <script src="book.js"></script>
 <script src="store.js"></script>
+<script src="history.js"></script>
+<script src="statement.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.9";
+var PANDAPOOLS_VERSION = "0.6.10";
 
 var App = (function () {
     var D = Decimal;
@@ -332,6 +335,7 @@ var App = (function () {
         else if (activeView === "mylp") renderMyLp();
         else if (activeView === "wallet") renderWallet();
         else if (activeView === "activity") renderActivity();
+        syncHistory();   // keep the permanent mirror current every block, whichever tab is open
         // keep the swap tab's recent strip fresh regardless of active tab
         if (activeView !== "swap") renderSwapRecent();
     }
@@ -1181,7 +1185,15 @@ var App = (function () {
             });
         });
     }
-    function renderActivity() { if (showGlobal) renderGlobal(); else renderMyActivity(); }
+    function renderActivity() { if (showGlobal) renderGlobal(); else { syncHistory(); renderMyActivity(); } }
+    /** Top up the permanent history mirror in the background, then repaint if it grew. Cheap when caught up:
+     *  the incremental pass stops at the first transaction it already holds. */
+    function syncHistory() {
+        if (History.isRunning()) return;
+        History.sync(function (added) {
+            if (added > 0 && activeView === "activity" && !showGlobal) renderMyActivity();
+        });
+    }
     function renderMyActivity() {
         Store.actList(60, function (log) {
             // in-flight (not yet confirmed, or a recent failure) AND confirmed — both drawn from the ActivityLog
@@ -1217,34 +1229,25 @@ var App = (function () {
         // sends, other dapps, strangers' swaps on pools I track), so keep only rows that touch a known pool
         // covenant address AND moved my wallet (non-zero difference; a stranger swap nets to zero for me).
         Store.knownAddrsGet(function (known) {
-            // Bound the reply HARD: a single contract-heavy txpow measured ~40 KB, and the node caps any reply at
-            // 256 KB (returns a "too long" stub → empty history), so max:50 (~2 MB) reliably came back EMPTY. max:4
-            // (~160 KB) stays safely under the cap. This mirrors native 0.9.14's small-first-page fix (native uses
-            // max:1 because it PAGES via HistoryDb/HistorySync; the MDS one-shot keeps a few rows). A persistent,
-            // adaptively-paged MDS history store is the full-parity fix — tracked as deferred #67.
-            MDS.cmd("history max:4", function (j) {
+            // Read from the PERMANENT mirror (pp_history), not a one-shot `history` call. The node retains only
+            // a window; this accumulates and is never pruned, so a transaction stays visible long after the node
+            // has forgotten it. History.sync() fills it in the background — see history.js (deferred #67).
+            Store.histAll(function (all) {
                 var rows = "";
                 try {
-                    var resp = j && j.response;
-                    var txp = resp && resp.txpows;
-                    // details[] is index-parallel to txpows[] and carries the per-tx `difference` map
-                    // ({tokenid: netAmount}). It has NO txpowid, so associate BY INDEX (not by id).
-                    var det = resp && resp.details;
-                    var list = Array.isArray(txp) ? txp : (Array.isArray(det) ? det : (Array.isArray(resp) ? resp : []));
-                    list.slice(0, 150).forEach(function (h, i) {
-                        var tp = h.txpow || h;
-                        var txid = (tp && tp.txpowid) || h.txpowid || "";
-                        var blk = (tp && tp.header && tp.header.block) || h.block || "";
+                    all.slice().reverse().forEach(function (h) {          // newest first for display
+                        var txid = h.txpowid || "";
                         if (!txid) return;
                         if (shownTx[txid.toLowerCase()]) return;   // already shown above as a local ActivityLog entry
-                        var diff = (Array.isArray(det) && det[i]) ? det[i].difference : ((h && h.difference) || null);
-                        if (!movedWallet(diff)) return;      // net-zero for me (stranger swap / reshuffle) → not mine
-                        if (!touchesPanda(tp, known)) return; // not a PandaPools txn (tp.body.txn carries addresses)
+                        var diff = null;
+                        try { diff = JSON.parse(h.deltas || "{}"); } catch (e) { return; }
+                        if (!movedWallet(diff)) return;            // net-zero for me (stranger swap / reshuffle)
+                        if (!histTouchesPanda(h, known)) return;   // not a PandaPools txn
                         var legs = swapLegs(diff, labels);
                         if (legs) {
-                            rows += '<div class="row"><span class="row__glyph">⇄</span><div class="row__mid"><div class="row__l1">' + esc(legs) + '</div><div class="row__l2">on-chain swap · ' + txidChip(txid) + '</div></div><div class="row__r">#' + esc(String(blk)) + '</div></div>';
+                            rows += '<div class="row"><span class="row__glyph">⇄</span><div class="row__mid"><div class="row__l1">' + esc(legs) + '</div><div class="row__l2">on-chain swap · ' + txidChip(txid) + '</div></div><div class="row__r">#' + esc(String(h.block)) + '</div></div>';
                         } else {
-                            rows += '<div class="row"><span class="row__glyph">⟲</span><div class="row__mid"><div class="row__l1">' + txidChip(txid) + '</div><div class="row__l2">pool transaction</div></div><div class="row__r">#' + esc(String(blk)) + '</div></div>';
+                            rows += '<div class="row"><span class="row__glyph">⟲</span><div class="row__mid"><div class="row__l1">' + txidChip(txid) + '</div><div class="row__l2">pool transaction</div></div><div class="row__r">#' + esc(String(h.block)) + '</div></div>';
                         }
                     });
                 } catch (e) {}
@@ -1254,6 +1257,13 @@ var App = (function () {
                 el("actList").innerHTML = html;
             });
         });
+    }
+    /** Does this stored row touch a known pool covenant address? Same test as touchesPanda, but reading the
+     *  normalised coin arrays kept in pp_history rather than a live txpow. */
+    function histTouchesPanda(h, known) {
+        try {
+            return addrHit(JSON.parse(h.inputs || "[]"), known) || addrHit(JSON.parse(h.outputs || "[]"), known);
+        } catch (e) { return false; }
     }
     // net non-zero effect on my wallet? a stranger's swap on a pool I track, or a self-reshuffle, nets to zero.
     function movedWallet(diff) {
@@ -1577,6 +1587,54 @@ var App = (function () {
             { label: "Done", cls: "btn", fn: function () { close(); } }
         ]);
     }
+    /**
+     * Export a per-pool statement: what you put in, your own trades against it, what is in the pool now, and
+     * the profit. Built from the permanent pp_history mirror plus the live reserves this tab already holds,
+     * so the file and the pool card cannot disagree.
+     */
+    function openStatement() {
+        var mineNow = POOLS.filter(mine);
+        if (!mineNow.length) { toast("No pools to report on yet."); return; }
+        syncHistory();                                   // top up first; the file says if it's still catching up
+        Store.knownAddrsGet(function (known) {
+            Store.histAll(function (rows) {
+                Store.kvGet("hist_backfilled", function (done) {
+                    var pools = mineNow.map(function (p) {
+                        return { address: p.address, label: PP.tokenLabel(p), reserveM: p.reserveM, reserveT: p.reserveT };
+                    });
+                    var csv = Statement.build(rows, pools, known,
+                        { at: Date.now(), version: PANDAPOOLS_VERSION, backfilled: done === "true" });
+                    showStatement(csv, rows.length, done === "true");
+                });
+            });
+        });
+    }
+    function showStatement(csv, rowCount, backfilled) {
+        var body = document.createElement("div");
+        var p = document.createElement("div"); p.className = "modal__desc";
+        p.innerText = "Trades listed are YOUR transactions only — not every trade against the pool. The profit "
+            + "figures are unaffected: they read the pool's reserves live, so everyone else's trading is already "
+            + "in them."
+            + (backfilled ? "" : "\n\nHistory is still syncing (" + rowCount + " transactions so far), so older "
+            + "trades of yours may be missing. The file says so too.");
+        body.appendChild(p);
+        var ta = document.createElement("textarea");
+        ta.readOnly = true; ta.value = csv;
+        ta.style.width = "100%"; ta.style.minHeight = "220px"; ta.style.fontFamily = "monospace";
+        ta.style.fontSize = "11px"; ta.style.marginTop = "6px";
+        body.appendChild(ta);
+        var dl = document.createElement("a");
+        dl.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
+        dl.download = "pandapools-statement-" + new Date().toISOString().slice(0, 10) + ".csv";
+        dl.className = "btn btn--full"; dl.innerText = "⬇ Download statement (.csv)";
+        dl.style.display = "block"; dl.style.marginTop = "8px"; dl.style.textAlign = "center";
+        body.appendChild(dl);
+        var close = openModal("Pool statement", body, null, [
+            { label: "Copy", cls: "btn btn--primary", fn: function () { try { ta.select(); document.execCommand("copy"); } catch (e) {} } },
+            { label: "Done", cls: "btn", fn: function () { close(); } }
+        ]);
+    }
+
     // ---- restore: re-track + best-effort coin re-import + persist the recipe, on ANY node
     function openRestore() {
         var body = document.createElement("div");
@@ -1652,7 +1710,7 @@ var App = (function () {
         rescan: rescan, confirmSwap: confirmSwap,
         openCreate: openCreate, openAdd: openAdd, openMigrate: openMigrate, confirmClose: confirmClose, dismissPending: dismissPending,
         copyAddr: copyAddr, copyText: copyText, setScope: setScope, setPoolsMode: setPoolsMode, gotoActivity: gotoActivity, cycleTheme: cycleTheme,
-        openRecovery: openRecovery
+        openRecovery: openRecovery, openStatement: openStatement
     };
 })();
 </script>

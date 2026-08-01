@@ -1,0 +1,19 @@
+{
+  "0": "service.js",
+  "1": "poolmgr.js",
+  "2": "decimal.js",
+  "3": "store.js",
+  "4": "curve.js",
+  "5": "book.js",
+  "6": "mds.js",
+  "7": "finalise",
+  "8": "digitsToString",
+  "9": "getPi",
+  "10": "parseOther",
+  "11": "router.js",
+  "12": "cosine",
+  "13": "log",
+  "14": "maxOrMin",
+  "15": "build.sh",
+  "16": "Changelog"
+}

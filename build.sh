@@ -23,7 +23,7 @@ OUT="PandaPools_${VERSION}.mds.zip"
 # Step 1: dapp.conf MUST be the first entry.
 zip -q "${OUT}" dapp.conf
 # Step 2: everything else the dapp ships.
-zip -q "${OUT}" index.html style.css mds.js decimal.js covenant.js curve.js router.js book.js poolmgr.js store.js service.js favicon.png minima.svg
+zip -q "${OUT}" index.html style.css mds.js decimal.js covenant.js curve.js router.js book.js poolmgr.js store.js history.js statement.js service.js favicon.png minima.svg
 
 echo "Archive contents (dapp.conf must be first):"
 echo "-------------------------------------------"

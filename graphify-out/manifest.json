@@ -48,5 +48,35 @@
     "mtime": 1784195405.9548383,
     "ast_hash": "835f8e1f3119947fa10d4b0c8236161c",
     "semantic_hash": "835f8e1f3119947fa10d4b0c8236161c"
+  },
+  "CHANGELOG.md": {
+    "mtime": 1785611601.1944613,
+    "ast_hash": "a195dc171d7fbbf48353e32e00563629",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1784124679.1756234,
+    "ast_hash": "4439d09bc81851d89f9ffcecc4136dcf",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1783939070.7698305,
+    "ast_hash": "acc9af3ca689f056214eb8d87bdbb8ac",
+    "semantic_hash": ""
+  },
+  "index.html": {
+    "mtime": 1785611390.2065759,
+    "ast_hash": "af746e4a9ae4cda1ad8984de032eb760",
+    "semantic_hash": ""
+  },
+  "favicon.png": {
+    "mtime": 1783782264.7608778,
+    "ast_hash": "4405044846878d63782dcefa9cdce8ef",
+    "semantic_hash": ""
+  },
+  "minima.svg": {
+    "mtime": 1783793406.476368,
+    "ast_hash": "cc109b2e17f747f2522e79a88b5f6eed",
+    "semantic_hash": ""
   }
 }

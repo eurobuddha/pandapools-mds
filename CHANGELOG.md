@@ -6,6 +6,15 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.10] — persistent paged history (#67) + the per-pool statement
+
+- **Added** `pp_history`: a permanent, txpowid-keyed mirror of the node's `history relevant:true`, the MiniDapp counterpart of the native app's `HistoryDb`. It accumulates and is never pruned — the node retains only a window, so once a transaction ages out of `history` this is the only remaining record of it. Closes deferred **#67**.
+- **Fixed** the Activity tab's one-shot `history max:4`, which showed about four transactions and could back nothing. It now reads the mirror, which `history.js` fills in the background with adaptive paging (backfill once, then incremental until it meets a transaction it already holds).
+- **Raised the page size 4 → 64.** The 256 KB reply cap is *not* a node limit — it lives in the Android broadcast receiver (`MinimaReceiver.MAX_MESSAGE_LEN`), so it binds the phone app and nothing else. `MDSCommandHandler` imposes no size limit and neither does the node core. The native app pages at `max:1` because an over-limit broadcast is an **uncatchable** Binder failure that kills the app; here the worst case is a page that doesn't arrive, which the adaptive halving recovers from. The page size is a throughput choice, not a safety constraint. Host-overridable via `MDS.historyPageMax` (minimaCore Desktop sets 512 — straight HTTP RPC, no cap at all).
+- **Added** the **per-pool statement** (My LP → Export statement): what you put in, your own trades, what is in the pool now, and the profit — as CSV, downloadable or copyable. Ported from native 0.9.19/0.9.20 and verified to reproduce its figures exactly.
+- A routed swap is **split across the pools it actually touched**, measured as `Σ(outputs at pool) − Σ(inputs at pool)`, with the split checked against the wallet's own movement; a row that doesn't tie is flagged and excluded rather than mis-booked.
+- Two labelled profit figures — **pool profit (vs holding)** (fees minus impermanent loss) and **change in market value** (which includes MINIMA's own price move). Nothing is estimated: where a value can't be obtained the file says so.
+
 ## [0.6.9] — Wallet: the full balance breakdown + a coin list (parity with native 0.9.20)
 
 - **Fixed** the Wallet hiding the numbers that explain itself. `Locked (in pools)` and `Pending` were rendered only when non-zero and `confirmed` was never shown at all — so a node with everything committed to a pool read `Sendable 0` with nothing accounting for the rest. Every figure now shows unconditionally, zeros included, on one line: `confirmed X · locked ≈ Y · unconfirmed Z · N coins · updated Ns ago · tap for coins`.
