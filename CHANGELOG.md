@@ -6,6 +6,14 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.9] — Wallet: the full balance breakdown + a coin list (parity with native 0.9.20)
+
+- **Fixed** the Wallet hiding the numbers that explain itself. `Locked (in pools)` and `Pending` were rendered only when non-zero and `confirmed` was never shown at all — so a node with everything committed to a pool read `Sendable 0` with nothing accounting for the rest. Every figure now shows unconditionally, zeros included, on one line: `confirmed X · locked ≈ Y · unconfirmed Z · N coins · updated Ns ago · tap for coins`.
+- `locked` is still `confirmed − sendable` (`sendable` counts only simple-address coins; `confirmed` includes contract-locked ones — here, your pool reserves), now carrying `≈` because it is derived, not node-supplied. Full precision via `PP.tidy`, so the Wallet and My LP agree about the same coins.
+- **Added** a **coin list** — tap any token card. Every coin the node holds for it, largest first, with its **full** coinid: no cap and no truncation, because an elided id can't be looked up. Tagged `(pool)` for covenant reserves (via the existing `Store.knownAddrsGet`) and `(beacon)` for registry dust at the sentinel, so the gap between confirmed and sendable is named rather than merely stated. Selectable, with a *copy all coins* action.
+- The coin query is bounded and omits `simplestate`; on the node's over-256KB stub it retries sendable-only and **says the list is partial** rather than quietly showing a subset.
+- Token amounts were already read correctly here (`tokenamount` for tokens, `amount` for `0x00`) — the native app's misread had no counterpart to fix.
+
 ## [0.6.8] — Pools tab: Individual | Combined view toggle
 
 - **Added** a toggle on the Pools tab: keep the per-pool list (**Individual**) or fold every pool of a token into **one collective-pool card** (**Combined**) — summed reserves + aggregate spot price + pool count + tradeable depth.

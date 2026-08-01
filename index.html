@@ -125,7 +125,7 @@
 <script src="store.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.8";
+var PANDAPOOLS_VERSION = "0.6.9";
 
 var App = (function () {
     var D = Decimal;
@@ -970,7 +970,7 @@ var App = (function () {
     // ---- token web-validation (ported from native WebValidate.java — the same check Minima Core / the wallets show) ----
     var MINIMA_ICON = "minima.svg";              // the official bundled Minima coin mark
     var VAL_CACHE = {}, VAL_INFLIGHT = {};       // norm(tokenid) -> true | false | undefined(not checked)
-    var lastWalletArr = null, walletRerenderPending = false;
+    var lastWalletArr = null, walletRerenderPending = false, lastBalanceAt = 0;
     function normTid(t) { t = String(t || "").trim().toLowerCase(); return t.indexOf("0x") === 0 ? t.substring(2) : t; }
     function isValidated(tid) { return VAL_CACHE[normTid(tid)] === true; }
     function tokenWebvalidate(token) {
@@ -1019,7 +1019,32 @@ var App = (function () {
         setTimeout(function () { walletRerenderPending = false; if (activeView === "wallet" && lastWalletArr) renderWalletCards(lastWalletArr); }, 350);
     }
 
-    function renderWallet() { MDS.cmd("balance", function (j) { renderWalletCards((j && j.status && Array.isArray(j.response)) ? j.response : []); }); }
+    function renderWallet() {
+        MDS.cmd("balance", function (j) {
+            lastBalanceAt = Date.now();            // drives the "updated Ns ago" stamp
+            renderWalletCards((j && j.status && Array.isArray(j.response)) ? j.response : []);
+        });
+    }
+    /**
+     * The full balance breakdown — parity with native 0.9.20 / AtomiX, whose whole point is that the
+     * displayed numbers are never a black box.
+     *
+     * EVERY figure shows, zeros included. Hiding a zero is what made this unreadable: on a node with all its
+     * funds committed to a pool you saw "Sendable 0" and nothing at all explaining where the money went.
+     *
+     * `locked` is confirmed − sendable: `sendable` counts only simple-address coins, `confirmed` counts every
+     * confirmed coin INCLUDING contract-locked ones — which here means your pool reserves. So the difference
+     * IS your committed liquidity. It is derived, not node-supplied, hence the "≈".
+     */
+    function walletBreakdown(b, confirmed, locked) {
+        var ago = lastBalanceAt ? Math.max(0, Math.round((Date.now() - lastBalanceAt) / 1000)) + "s ago" : "never";
+        return "confirmed " + PP.tidy(confirmed)
+             + "  ·  locked ≈ " + PP.tidy(locked)
+             + "  ·  unconfirmed " + PP.tidy(PP.decOr(b.unconfirmed, 0))
+             + "  ·  " + String(b.coins || "0") + " coins"
+             + "  ·  updated " + ago
+             + "  ·  tap for coins";
+    }
     function renderWalletCards(arr) {
         arr = arr.slice().sort(function (x, y) {
             var mx = x.tokenid === "0x00", my = y.tokenid === "0x00";
@@ -1046,13 +1071,76 @@ var App = (function () {
                 validated = isValidated(tid);
             }
             var iconHtml = '<span class="tok-wrap">' + iconInner + (validated ? '<span class="tok-badge" title="Web-validated">✓</span>' : '') + '</span>';
-            html += '<div class="card' + (tid === "0x00" ? " card--accent" : "") + '"><div class="card__title">' + iconHtml + esc(name.toUpperCase()) + '</div>' +
-                kvRow("Sendable", PP.tidy(sendable), "green");
-            if (locked.gt(0)) html += kvRow("Locked (in pools)", PP.tidy(locked));
-            if (PP.decOr(b.unconfirmed, 0).gt(0)) html += kvRow("Pending", PP.tidy(b.unconfirmed));
-            html += kvRow("Coins", String(b.coins || "0")) + '</div>';
+            html += '<div class="card' + (tid === "0x00" ? " card--accent" : "") + ' card--coins" data-tokenid="' + escAttr(tid) + '">' +
+                '<div class="card__title">' + iconHtml + esc(name.toUpperCase()) + '</div>' +
+                kvRow("Sendable", PP.tidy(sendable), "green") +
+                '<div class="bal-breakdown">' + esc(walletBreakdown(b, confirmed, locked)) + '</div>' +
+                '</div>';
         });
         el("walletList").innerHTML = html || '<div class="empty">No balances yet.</div>';
+        Array.prototype.forEach.call(el("walletList").querySelectorAll(".card--coins"), function (card) {
+            card.onclick = function () { showCoins(card.getAttribute("data-tokenid")); };
+        });
+    }
+
+    /**
+     * Every coin the node holds for this token — the answer to "why is confirmed bigger than sendable".
+     *
+     * Full coinids, nothing capped or elided, and the whole list is copyable: this is an audit view, so a
+     * truncated id would make it useless for looking a coin up. Coins are tagged (pool) when they sit at a
+     * covenant address we know, and (beacon) for the shared registry dust — between them they account for
+     * most of the gap between the two figures.
+     *
+     * BOUNDED query: the node discards any reply over 256 KB and returns a stub instead, so we ask without
+     * `simplestate` (which is what inflates it) and, if it still overflows, fall back to sendable-only and
+     * SAY the list is partial rather than quietly showing a subset.
+     */
+    function showCoins(tokenid) {
+        var body = document.createElement("div");
+        var pre = document.createElement("pre");
+        pre.className = "coindump";
+        pre.innerText = "Loading coins…";
+        var copy = document.createElement("div");
+        copy.className = "copyline";
+        copy.innerText = "copy all coins";
+        copy.onclick = function (ev) { copyText(pre.innerText, ev); };
+        body.appendChild(copy);
+        body.appendChild(pre);
+        var close = openModal("Coins", body, null, [{ label: "Close", cls: "btn", fn: function () { close(); } }]);
+
+        Store.knownAddrsGet(function (known) {
+            var base = "coins relevant:true tokenid:" + tokenid;
+            MDS.cmd(base, function (j) {
+                if (j && j.status && Array.isArray(j.response)) { pre.innerText = coinDumpText(j.response, known, false); return; }
+                MDS.cmd(base + " sendable:true", function (j2) {
+                    pre.innerText = (j2 && j2.status && Array.isArray(j2.response))
+                        ? coinDumpText(j2.response, known, true)
+                        : "Couldn't load coins.";
+                });
+            });
+        });
+    }
+    function coinDumpText(coins, known, sendableOnly) {
+        if (!coins.length) return "No coins.";
+        var rows = coins.slice().map(function (c) {
+            var tid = c.tokenid || "0x00";
+            var amt = PP.isMinima(tid) ? (c.amount || "0")
+                                       : (c.tokenamount !== undefined ? c.tokenamount : (c.amount || "0"));
+            return { amt: PP.decOr(amt, 0), coinid: String(c.coinid || ""), tag: coinTag(c, known) };
+        });
+        rows.sort(function (a, b) { return b.amt.cmp(a.amt); });
+        var out = sendableOnly ? "(the node's reply was over its size cap — sendable coins only)\n\n" : "";
+        rows.forEach(function (r) { out += PP.tidy(r.amt) + r.tag + "\n" + r.coinid + "\n"; });
+        return out.replace(/\n+$/, "");
+    }
+    /** Why this coin isn't sendable: a pool reserve sits at its covenant address, a discovery beacon is dust
+     *  at the shared sentinel. Anything untagged is locked by something else. */
+    function coinTag(c, known) {
+        var mx = c.miniaddress ? String(c.miniaddress).toLowerCase() : "";
+        var ad = c.address ? String(c.address).toLowerCase() : "";
+        if ((mx && known[mx]) || (ad && known[ad])) return "   (pool)";
+        if (ad && ad === Covenant.SENTINEL.toLowerCase()) return "   (beacon)";
+        return "";
     }
 
     // ================================================================ ACTIVITY

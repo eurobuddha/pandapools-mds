@@ -1,0 +1,395 @@
+{
+  "communities": {
+    "0": [
+      "covenant_kmin",
+      "service",
+      "service_annkeysvc",
+      "service_covscript",
+      "service_deccmp",
+      "service_decdiv",
+      "service_decsnap",
+      "service_decsub",
+      "service_derive",
+      "service_done",
+      "service_encsnap",
+      "service_ensureown",
+      "service_ensuretables",
+      "service_esc",
+      "service_fillreservessvc",
+      "service_fund",
+      "service_grp",
+      "service_ingestfeed",
+      "service_isfunded",
+      "service_labelof",
+      "service_maybereannouncesvc",
+      "service_mayberefreshsvc",
+      "service_migratefeedkind",
+      "service_pad0",
+      "service_pow10",
+      "service_readstate",
+      "service_reannouncesvc",
+      "service_refreshsvc",
+      "service_retrackown",
+      "service_runcmds",
+      "service_sanitizelabel",
+      "service_savesnap",
+      "service_scaleto",
+      "service_scan",
+      "service_scriptarg",
+      "service_short",
+      "service_shufflearr",
+      "service_splitdec",
+      "service_trimfeed",
+      "service_truthy",
+      "service_unscale"
+    ],
+    "1": [
+      "poolmgr",
+      "poolmgr_addannouncestate",
+      "poolmgr_buildandpost",
+      "poolmgr_buildcreate",
+      "poolmgr_buildmigrate",
+      "poolmgr_buildrouted",
+      "poolmgr_close",
+      "poolmgr_coinamt",
+      "poolmgr_countsigs",
+      "poolmgr_createpool",
+      "poolmgr_deposit",
+      "poolmgr_deriveaddress",
+      "poolmgr_ensureownerkeys",
+      "poolmgr_ensuretracked",
+      "poolmgr_ensuretrackedall",
+      "poolmgr_errof",
+      "poolmgr_extracttxpowid",
+      "poolmgr_finalize",
+      "poolmgr_findtxn",
+      "poolmgr_forwardownerfunds",
+      "poolmgr_huntkeys",
+      "poolmgr_ispending",
+      "poolmgr_migrate",
+      "poolmgr_onnewblock",
+      "poolmgr_pendingmsg",
+      "poolmgr_pubkeysof",
+      "poolmgr_reannounce",
+      "poolmgr_refresh",
+      "poolmgr_runchain",
+      "poolmgr_selectcoins",
+      "poolmgr_setstatushook",
+      "poolmgr_signall",
+      "poolmgr_swap",
+      "poolmgr_sweepownerfunds",
+      "poolmgr_tag",
+      "poolmgr_waitsign"
+    ],
+    "2": [
+      "decimal",
+      "decimal_abs",
+      "decimal_acos",
+      "decimal_acosh",
+      "decimal_add",
+      "decimal_asin",
+      "decimal_asinh",
+      "decimal_atanh",
+      "decimal_cbrt",
+      "decimal_clamp",
+      "decimal_clone",
+      "decimal_compare",
+      "decimal_config",
+      "decimal_cos",
+      "decimal_cosh",
+      "decimal_div",
+      "decimal_exp",
+      "decimal_getprecision",
+      "decimal_hypot",
+      "decimal_isdecimalinstance",
+      "decimal_ln",
+      "decimal_mod",
+      "decimal_mul",
+      "decimal_multiplyinteger",
+      "decimal_pow",
+      "decimal_sign",
+      "decimal_sin",
+      "decimal_sinh",
+      "decimal_sqrt",
+      "decimal_sub",
+      "decimal_subtract",
+      "decimal_tan",
+      "decimal_tanh"
+    ],
+    "3": [
+      "store",
+      "store_actlist",
+      "store_actrecord",
+      "store_actrecordfailed",
+      "store_actsetstatus",
+      "store_confirmed",
+      "store_create",
+      "store_ensureownpools",
+      "store_esc",
+      "store_feedlist",
+      "store_init",
+      "store_knownaddrsadd",
+      "store_knownaddrsget",
+      "store_lpget",
+      "store_lprecord",
+      "store_lpremove",
+      "store_lpupdatefeebase",
+      "store_migrateactivityrefaddr",
+      "store_migratefeedkind",
+      "store_ownall",
+      "store_ownrecord",
+      "store_statustext",
+      "store_trimactivity",
+      "store_upsertlp"
+    ],
+    "4": [
+      "curve",
+      "curve_aggregateprice",
+      "curve_amt",
+      "curve_clampdec",
+      "curve_dec",
+      "curve_decor",
+      "curve_feegrowth",
+      "curve_fix",
+      "curve_funded",
+      "curve_grain",
+      "curve_isminima",
+      "curve_k",
+      "curve_plain",
+      "curve_quotemtot",
+      "curve_quotettom",
+      "curve_shorten",
+      "curve_spotprice",
+      "curve_tidy",
+      "curve_tokendecimals",
+      "curve_tokenlabel",
+      "curve_tokenname",
+      "curve_totalminima",
+      "curve_truthy"
+    ],
+    "5": [
+      "book",
+      "book_derivepools",
+      "book_done",
+      "book_finishscan",
+      "book_fund",
+      "book_gatherowned",
+      "book_gatherregistry",
+      "book_group",
+      "book_parsescripts",
+      "book_readstate",
+      "book_scan",
+      "covenant",
+      "covenant_script",
+      "covenant_scriptarg",
+      "covenant_sizeok"
+    ],
+    "6": [
+      "mds",
+      "mds_base64toarraybuffer",
+      "mds_base64tohex",
+      "mds_getstatevariable",
+      "mds_hextobase64",
+      "mds_httppostasync",
+      "mds_httppostasyncpoll",
+      "mds_mdspostmessage",
+      "mds_polllistener",
+      "mds_postmdsfail",
+      "mds_recurseuploadmds"
+    ],
+    "7": [
+      "decimal_ceil",
+      "decimal_checkroundingdigits",
+      "decimal_finalise",
+      "decimal_floor",
+      "decimal_getln10",
+      "decimal_naturalexponential",
+      "decimal_naturallogarithm",
+      "decimal_round",
+      "decimal_sum",
+      "decimal_trunc"
+    ],
+    "8": [
+      "decimal_checkint32",
+      "decimal_convertbase",
+      "decimal_digitstostring",
+      "decimal_finitetostring",
+      "decimal_getzerostring",
+      "decimal_nonfinitetostring",
+      "decimal_random",
+      "decimal_tostringbinary"
+    ],
+    "9": [
+      "decimal_atan",
+      "decimal_atan2",
+      "decimal_getpi",
+      "decimal_isodd",
+      "decimal_tolessthanhalfpi"
+    ],
+    "10": [
+      "decimal_getbase10exponent",
+      "decimal_intpow",
+      "decimal_parsedecimal",
+      "decimal_parseother",
+      "decimal_truncate"
+    ],
+    "11": [
+      "router",
+      "router_aggregatedepth",
+      "router_bytoken",
+      "router_quote",
+      "router_route"
+    ],
+    "12": [
+      "decimal_cosine",
+      "decimal_sine",
+      "decimal_taylorseries",
+      "decimal_tinypow"
+    ],
+    "13": [
+      "decimal_log",
+      "decimal_log10",
+      "decimal_log2"
+    ],
+    "14": [
+      "decimal_max",
+      "decimal_maxormin",
+      "decimal_min"
+    ],
+    "15": [
+      "build",
+      "build_sh__entry"
+    ]
+  },
+  "cohesion": {
+    "0": 0.11951219512195121,
+    "1": 0.14285714285714285,
+    "2": 0.0625,
+    "3": 0.14130434782608695,
+    "4": 0.15810276679841898,
+    "5": 0.2,
+    "6": 0.2727272727272727,
+    "7": 0.24444444444444444,
+    "8": 0.32142857142857145,
+    "9": 0.4,
+    "10": 0.4,
+    "11": 0.5,
+    "12": 0.6666666666666666,
+    "13": 0.6666666666666666,
+    "14": 0.6666666666666666,
+    "15": 1.0
+  },
+  "gods": [
+    {
+      "id": "poolmgr_buildandpost",
+      "label": "buildAndPost()",
+      "degree": 13
+    },
+    {
+      "id": "service_ingestfeed",
+      "label": "ingestFeed()",
+      "degree": 12
+    },
+    {
+      "id": "decimal_finalise",
+      "label": "finalise()",
+      "degree": 10
+    },
+    {
+      "id": "poolmgr_tag",
+      "label": "tag()",
+      "degree": 9
+    },
+    {
+      "id": "store_esc",
+      "label": "esc()",
+      "degree": 9
+    },
+    {
+      "id": "poolmgr_selectcoins",
+      "label": "selectCoins()",
+      "degree": 8
+    },
+    {
+      "id": "service_deccmp",
+      "label": "decCmp()",
+      "degree": 8
+    },
+    {
+      "id": "curve_funded",
+      "label": "funded()",
+      "degree": 7
+    },
+    {
+      "id": "curve_k",
+      "label": "k()",
+      "degree": 7
+    },
+    {
+      "id": "service_decsub",
+      "label": "decSub()",
+      "degree": 7
+    }
+  ],
+  "surprises": [
+    {
+      "source": "gatherRegistry()",
+      "target": "kmin()",
+      "source_files": [
+        "book.js",
+        "covenant.js"
+      ],
+      "confidence": "INFERRED",
+      "relation": "indirect_call",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "finishScan()",
+      "target": "k()",
+      "source_files": [
+        "book.js",
+        "curve.js"
+      ],
+      "confidence": "INFERRED",
+      "relation": "indirect_call",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "createPool()",
+      "target": "script()",
+      "source_files": [
+        "poolmgr.js",
+        "covenant.js"
+      ],
+      "confidence": "INFERRED",
+      "relation": "indirect_call",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "derive()",
+      "target": "script()",
+      "source_files": [
+        "service.js",
+        "covenant.js"
+      ],
+      "confidence": "INFERRED",
+      "relation": "indirect_call",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "retrackOwn()",
+      "target": "script()",
+      "source_files": [
+        "service.js",
+        "covenant.js"
+      ],
+      "confidence": "INFERRED",
+      "relation": "indirect_call",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
+    }
+  ],
+  "tokens": {
+    "input": 0,
+    "output": 0
+  }
+}

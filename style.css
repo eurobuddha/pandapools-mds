@@ -111,6 +111,14 @@ body {
 .kv__v--amber { color: var(--amber); }
 .kv__v--red { color: var(--red); }
 
+/* Wallet card: the full balance breakdown (confirmed · locked · unconfirmed · coins · updated) — every
+   figure shown, zeros included, so the displayed numbers are never a black box. */
+.bal-breakdown { color: var(--dim); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; margin-top: 6px; word-break: break-word; }
+.card--coins { cursor: pointer; }
+/* Coin dump: an audit view, so FULL coinids and no truncation — it must wrap, never elide. */
+.coindump { color: var(--text); font-family: var(--mono); font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-all; margin: 0; max-height: 60vh; overflow-y: auto; user-select: text; }
+.copyline { color: var(--accent); font-size: 12px; cursor: pointer; padding: 2px 0 8px; }
+
 /* Swap panel */
 .swapbox { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
 .swap-leg { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; }
