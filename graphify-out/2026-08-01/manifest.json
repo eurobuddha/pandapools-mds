@@ -5,9 +5,9 @@
     "semantic_hash": "0da3dfcc797cade0b6ac5df88dccb712"
   },
   "build.sh": {
-    "mtime": 1785612651.116521,
-    "ast_hash": "0f59f11d2c63cbbd2c63484a7ea8336c",
-    "semantic_hash": ""
+    "mtime": 1783787326.2544656,
+    "ast_hash": "2bea68bc848c3cc8f52c75861cd8354d",
+    "semantic_hash": "2bea68bc848c3cc8f52c75861cd8354d"
   },
   "covenant.js": {
     "mtime": 1783768580.6056354,
@@ -45,13 +45,13 @@
     "semantic_hash": "a26786c5aed9f56da20206c2c7ce4983"
   },
   "store.js": {
-    "mtime": 1785612054.346022,
-    "ast_hash": "616f8180e44891bf6d0822bec7af460c",
-    "semantic_hash": ""
+    "mtime": 1784195405.9548383,
+    "ast_hash": "835f8e1f3119947fa10d4b0c8236161c",
+    "semantic_hash": "835f8e1f3119947fa10d4b0c8236161c"
   },
   "CHANGELOG.md": {
-    "mtime": 1785612959.780742,
-    "ast_hash": "dd493bab1fb66b0d0b02de3425564340",
+    "mtime": 1785611601.1944613,
+    "ast_hash": "a195dc171d7fbbf48353e32e00563629",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
@@ -65,8 +65,8 @@
     "semantic_hash": ""
   },
   "index.html": {
-    "mtime": 1785612663.5248501,
-    "ast_hash": "ac6610b080444a44f3179704b383f2db",
+    "mtime": 1785611390.2065759,
+    "ast_hash": "af746e4a9ae4cda1ad8984de032eb760",
     "semantic_hash": ""
   },
   "favicon.png": {
@@ -77,16 +77,6 @@
   "minima.svg": {
     "mtime": 1783793406.476368,
     "ast_hash": "cc109b2e17f747f2522e79a88b5f6eed",
-    "semantic_hash": ""
-  },
-  "history.js": {
-    "mtime": 1785612712.6492267,
-    "ast_hash": "58b7efa62d41a898ad6d60f06bedc33e",
-    "semantic_hash": ""
-  },
-  "statement.js": {
-    "mtime": 1785612542.297842,
-    "ast_hash": "c0ad6995f85447c7ab4f0bbea4cd4f90",
     "semantic_hash": ""
   }
 }

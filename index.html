@@ -128,7 +128,7 @@
 <script src="statement.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.10";
+var PANDAPOOLS_VERSION = "0.6.11";
 
 var App = (function () {
     var D = Decimal;
@@ -1554,12 +1554,23 @@ var App = (function () {
                           tok: r.tok || "", dec: (r.tokDecimals == null ? 8 : r.tokDecimals), kmin: r.kmin || "0", script: r.script || "" };
                 pools.push(e);
                 var f = funded[(r.address || "").toLowerCase()];
-                if (f && f.coinidM && f.coinidT) {
-                    exportCoin(f.coinidM, function (cm) {
-                        if (cm) e.cm = cm;
-                        exportCoin(f.coinidT, function (ct) { if (ct) e.ct = ct; if (--pending === 0) finishBackup(pools); });
+                var afterCoins = function () {
+                    if (f && f.coinidM && f.coinidT) {
+                        exportCoin(f.coinidM, function (cm) {
+                            if (cm) e.cm = cm;
+                            exportCoin(f.coinidT, function (ct) { if (ct) e.ct = ct; if (--pending === 0) finishBackup(pools); });
+                        });
+                    } else if (--pending === 0) finishBackup(pools);
+                };
+                // Stamp the owner key's ACTUAL one-time-signature count (and the height it was read at).
+                // This is what makes a later restore safe: without it the regenerated key resumes at leaf 0
+                // and re-signs leaves the pre-restore node already spent. Best-effort.
+                if (e.opk) {
+                    PoolMgr.readKeyUses(e.opk, function (uses) {
+                        if (uses !== null) { e.opkuses = uses; if (CURRENT_BLOCK > 0) e.atblock = CURRENT_BLOCK; }
+                        afterCoins();
                     });
-                } else if (--pending === 0) finishBackup(pools);
+                } else { afterCoins(); }
             });
         });
     }
@@ -1567,7 +1578,7 @@ var App = (function () {
         MDS.cmd("coinexport coinid:" + coinid, function (j) { var r = j ? j.response : null; cb(r && r.data ? r.data : ""); });
     }
     function finishBackup(pools) {
-        var json = JSON.stringify({ pandapools_backup: 1, pools: pools }, null, 2);
+        var json = JSON.stringify({ pandapools_backup: 2, pools: pools }, null, 2);
         var body = document.createElement("div");
         var p = document.createElement("div"); p.className = "modal__desc";
         p.innerText = "Save this somewhere safe (a file, a note, cloud). To restore later, paste it into Restore on any device. Public data only — no seed.";
@@ -1673,13 +1684,52 @@ var App = (function () {
                     PoolMgr.ensureOwnerKeys(opks, function (regen) {
                         statusEl.innerText = "Re-tracked " + ok + " of " + total + " pool" + (total === 1 ? "" : "s")
                             + (regen > 0 ? " (regenerated " + regen + " owner key" + (regen === 1 ? "" : "s") + ")" : "")
-                            + " — if your node prompts, approve the pending actions. Re-scanning…";
-                        rescan(true);
+                            + " — restoring key usage…";
+                        // A regenerated key comes back at uses = 0. Wind it forward to where it actually left
+                        // off BEFORE anything can sign with it — that ordering is the whole fix.
+                        advanceRestoredKeys(pools, 0, function (warn) {
+                            statusEl.innerText = "Re-tracked " + ok + " of " + total + " pool" + (total === 1 ? "" : "s")
+                                + (regen > 0 ? " (regenerated " + regen + " owner key" + (regen === 1 ? "" : "s") + ")" : "")
+                                + (warn ? " — " + warn : " — if your node prompts, approve the pending actions.")
+                                + " Re-scanning…";
+                            rescan(true);
+                        });
                     });
                 }
             });
         });
     }
+    /** Owner actions other than keep-fresh that could also have signed since the backup. Erring high
+     *  costs a leaf out of 262,144; falling short leaks the key. */
+    var USES_SLACK = 50;
+
+    /** Wind each restored owner key forward to the count it had reached. Sequential on purpose — each pass
+     *  burns real signatures, and firing them concurrently is the pattern that caused reuse in the first
+     *  place. Best-effort per pool, but every failure is REPORTED, never swallowed. */
+    function advanceRestoredKeys(pools, i, done) {
+        if (i >= pools.length) { done(null); return; }
+        var e = pools[i];
+        var next = function (w) { advanceRestoredKeys(pools, i + 1, w ? function (x) { done(w); } : done); };
+        if (!e || !e.opk) { advanceRestoredKeys(pools, i + 1, done); return; }
+        var label = PP.shorten(e.addr || "pool");
+        if (e.opkuses === undefined) {
+            // A pre-v2 backup carries no count. Say so rather than quietly resuming at leaf 0.
+            advanceRestoredKeys(pools, i + 1, function () {
+                done("! " + label + ": this backup predates key-use tracking, so the owner key's signature "
+                   + "count is unknown. Re-back-up now and avoid reusing this pool.");
+            });
+            return;
+        }
+        var target = PoolMgr.restoreTarget(e.opkuses, e.atblock || 0, CURRENT_BLOCK, USES_SLACK);
+        PoolMgr.advanceKeyUses(e.opk, target, null, function (ok, finalUses, err) {
+            if (ok) { advanceRestoredKeys(pools, i + 1, done); return; }
+            advanceRestoredKeys(pools, i + 1, function () {
+                done("! " + label + ": could not restore the owner key's usage (" + err + "). Do not use this "
+                   + "pool until that succeeds — signing now could expose the key.");
+            });
+        });
+    }
+
     function restoreOne(e, cb) {
         if (!e || !e.addr) { cb(false); return; }
         Store.ownRecord({ address: e.addr, mxaddress: e.mx || "", opk: e.opk || "", oadr: e.oadr || "",

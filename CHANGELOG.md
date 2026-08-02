@@ -6,6 +6,14 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.11] — carry the owner key's signature count through backup and restore
+
+- **Fixed** the last key-reuse path (parity with native 0.9.23). A pool's owner key is minted with `newaddress`, so a seed-only re-sync doesn't bring it back — only the 64 defaults are rebuilt. `ensureOwnerKeys` re-mints it correctly, but the node inserts **every** new key at `uses = 0`, so the next owner action re-signed leaves the pre-restore node had already spent. Signing one Winternitz leaf twice leaks its private key.
+- **Added** `opkuses` + `atblock` to the backup (**format v2**): the owner key's real signature count and the height it was read at. On restore the target is `count + elapsed blocks ÷ 900 + slack` — every term measured or derived.
+- Advanced by burning leaves (`sign` increments and persists `uses`), since no command sets a counter and the private key can't be fetched. **Works on any node** — no forked build, no new command.
+- A pre-v2 backup, or a key the advance can't reach, is reported — never silently resumed at leaf 0.
+- The arithmetic is verified case-by-case against the native Java implementation.
+
 ## [0.6.10] — persistent paged history (#67) + the per-pool statement
 
 - **Added** `pp_history`: a permanent, txpowid-keyed mirror of the node's `history relevant:true`, the MiniDapp counterpart of the native app's `HistoryDb`. It accumulates and is never pruned — the node retains only a window, so once a transaction ages out of `history` this is the only remaining record of it. Closes deferred **#67**.
