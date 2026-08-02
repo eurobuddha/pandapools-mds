@@ -4,7 +4,7 @@ A **constant-product AMM (automated market maker)** for the [Minima](https://min
 
 This is the **MiniDapp edition** of PandaPools. It is a faithful port of the native Android PandaPools app and — crucially — **shares the same mainnet registry and covenant**, so both apps discover and trade the **same live pools**. A pool created in the native app is swappable here and vice-versa.
 
-> **Status:** feature-complete at **v0.6.0** (full parity with native app 0.9.9). The remaining pre-release step is a live dust-lifecycle + interop test on a synced, funded classic node — see [Release status](#release-status).
+> **Status:** feature-complete and tracking the latest native Android PandaPools line: MiniDapp **v0.6.17** mirrors native app **0.9.23** for the shared on-chain covenant, routing, LP lifecycle, recovery, accounting, and fund-safety behaviour.
 
 > ⚠️ **Development software — use at your own risk.** PandaPools is experimental, actively-developed software provided **AS IS**, without warranty of any kind. It builds and posts real on-chain transactions that move real funds; despite extensive testing and code review, bugs may exist. Test with small amounts first, keep your seed backed up, and only risk what you can afford to lose. Nothing here is financial advice. See the [MIT License](LICENSE).
 
@@ -62,10 +62,10 @@ All fund-critical arithmetic uses **[decimal.js](https://mikemcl.github.io/decim
 
 Pools are found from a **shared on-chain registry**: a dust "beacon" coin at the sentinel address `0x50414E4441504F4F4C53` (the hex of `"PANDAPOOLS"`) carrying the pool's params in state ports 0–5. Discovery **re-derives each pool's covenant address from its params and only surfaces it if the script compiles** (`parseok`) — a forged beacon can at worst point at a real-but-bad pool, which the reserve/price filters drop. Two sources are merged:
 
-1. **GTC (good-till-cancelled):** this node's own tracked pool contracts (via `scripts`). A spendable contract never prunes, so your pools stay enumerable forever, independent of the beacon.
+1. **GTC (good-till-cancelled):** this node's own tracked pool contracts (via `scripts`). A spendable contract never prunes, so your own pools stay enumerable forever, independent of the beacon.
 2. **Registry beacons:** other creators' pools (via `coins address:<sentinel>`).
 
-Newly-seen pools are **`newscript trackall`-ed once** ("track-on-discovery") so they stay visible + swappable on this node forever.
+Track-on-discovery for other creators' pools was deliberately removed in the native 0.9.14 / MDS 0.6.4 line: tracking every discovered covenant made the node's `scripts` reply grow without bound. Newly-seen pools remain visible through the bounded recent registry window, and the decentralized re-announce mesh keeps their beacons fresh.
 
 ---
 
@@ -102,10 +102,10 @@ Scaffolded from the Limit DEX MiniDapp; command strings are byte-identical to th
 | `covenant.js` | The 0.5 % covenant template + address derivation, KMIN canonicalization, the SENTINEL, and `scriptArg` (a JSON-quote that does **not** escape `/` — see [Fund-safety](#fund-safety-design)). |
 | `curve.js` | `VirtualCurve` — constant-product quoting with grain-correct, pool-favourable rounding; spot price, K, fee-growth, aggregate depth. |
 | `router.js` | `PoolRouter` — 128-step water-filling split across all pools for a pair (N equal pools ≡ one deep pool); capped at 6 legs. |
-| `book.js` | `PoolBook` — trust-nothing discovery (GTC + registry), re-derivation + parseok gate, largest-coin reserve read, track-on-discovery. |
+| `book.js` | `PoolBook` — trust-nothing discovery (own tracked pools + bounded registry), re-derivation + parseok gate, largest-coin reserve read. |
 | `poolmgr.js` | `PoolManager` / `PoolTxn` / `TxPost` — the fund-moving code: create / add / migrate / close / swap / **re-announce**, the `txncheck` gate, and the restricted-MDS pending-sign resume flow. |
 | `store.js` | Local persistence via `MDS.sql`: `pp_lp` (LP baselines), `pp_activity` (lifecycle log), `pp_feed`+`pp_kv` (global feed, **read-only from the page**), `pp_ownpools` (recovery recipes), plus the known-address set for personal-activity scoping. |
-| `service.js` | The **background worker** — the *sole* global-feed ingester, track-on-discovery, re-track-on-launch, and the background re-announce sweep. Runs headless whenever the node is up. Self-contained (the MDS service runtime injects only `MDS`, so the covenant, decimals, and helpers are inlined). |
+| `service.js` | The **background worker** — the *sole* global-feed ingester, re-track-on-launch for owned pools, keep-fresh, and the background re-announce sweep. Runs headless whenever the node is up. Self-contained (the MDS service runtime injects only `MDS`, so the covenant, decimals, and helpers are inlined). |
 | `index.html` | The 5-tab UI, discovery/render loop, recovery UI, and a 3-theme switcher. |
 | `decimal.js` | Vendored exact-decimal library. |
 | `build.sh` | Packages `PandaPools_<version>.mds.zip` (dapp.conf first, or MDS install silently fails; version-drift guard). |
@@ -139,7 +139,7 @@ Requires an **official Minima node with MDS** (v1.0.46+; MDS listens on `MINIMA_
 
 **Via the terminal:**
 ```bash
-mds action:install file:/path/to/PandaPools_0.6.0.mds.zip
+mds action:install file:/path/to/PandaPools_0.6.17.mds.zip
 ```
 
 Grant it **WRITE** access when prompted (needed to mint owner keys, sign, and run the background re-announce). On a read-restricted node it still works via a pending-sign approval flow, with an approval tap per action.
@@ -174,15 +174,15 @@ WRITE access is recommended (create/swap/close, background re-announce, owner-ke
 
 ## Release status
 
-The code is feature-complete and every stage was code-reviewed. The final pre-store gate is a **live dust-lifecycle + interop test on a synced, funded classic node**: create → swap → add → migrate → close, back up → restore, confirm the background service runs headless and re-announces, and confirm the MiniDapp sees pools the native app created (and vice-versa). After that it ships to the `panda_dapps` MiniDapp store.
+The code is feature-complete and has tracked the native Android app through the **0.9.23** fund-safety line. Current release gates are: install on a synced, funded classic node; create → swap → add → migrate → close; back up → restore; confirm the background service runs headless and re-announces; and confirm MiniDapp/native interop in both directions.
 
-**Known limitation (tracked):** My Activity reads a bounded live `history` window each render rather than a persistent, adaptively-paged store — fine for recent activity; a persistent history DB (matching the native `HistoryDb`) is the planned hardening.
+My Activity and the per-pool statement now read the permanent `pp_history` mirror (`history.js` + `Store.ensureHistory`), matching the native `HistoryDb` model rather than a bounded live history window.
 
 ---
 
 ## Version history
 
-See **[CHANGELOG.md](CHANGELOG.md)** and the [Releases](../../releases) page. In short: `v0.1.7` (initial MiniDapp) → `v0.6.0` (full parity with native 0.9.9), delivered over six review-gated stages (background-service feed authority, full-lifecycle Activity, and all five recovery layers).
+See **[CHANGELOG.md](CHANGELOG.md)** and the [Releases](../../releases) page. In short: `v0.1.7` (initial MiniDapp) → `v0.6.0` (full parity with native 0.9.9) → `v0.6.17` (parity polish after native 0.9.23's signing, coin-lock, wallet-detail, owner-key-use, history paging, and token-metadata hardening).
 
 ---
 

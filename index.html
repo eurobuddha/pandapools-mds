@@ -13,7 +13,7 @@
         <div class="hdr__logo">
             <span class="hdr__mark">◈</span>
             <span class="hdr__title">PandaPools</span>
-            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.6.0</span></span>
+            <span class="hdr__sub">LIQUIDITY POOLS · <span id="verLabel">v0.6.17</span></span>
         </div>
         <div class="hdr__wallet">
             <span class="hdr__style" onclick="App.cycleTheme()">◐ STYLE</span>
@@ -128,7 +128,7 @@
 <script src="statement.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.11";
+var PANDAPOOLS_VERSION = "0.6.17";
 
 var App = (function () {
     var D = Decimal;
@@ -984,12 +984,15 @@ var App = (function () {
         if (token.webvalidate) return String(token.webvalidate);
         return "";
     }
-    function blockedHost(u) {   // SSRF guard: no loopback/LAN webvalidate targets (mirrors ImageLoader.isBlockedHost)
+    function blockedHost(u) {   // SSRF guard: no loopback/LAN token-metadata targets (mirrors ImageLoader.isBlockedHost)
         try {
-            var h = new URL(u).hostname.toLowerCase();
+            var h = new URL(u).hostname.toLowerCase().replace(/^\[|\]$/g, "");
             if (h === "localhost" || h === "0.0.0.0" || h === "::1") return true;
-            if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h)) return true;
+            if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h)) return true;
             if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+            if (/^(fc|fd)[0-9a-f]{2}:/i.test(h) || /^fe80:/i.test(h)) return true;
+            if (/^::ffff:(127\.|10\.|192\.168\.|169\.254\.)/i.test(h)) return true;
+            if (/^::ffff:172\.(1[6-9]|2\d|3[01])\./i.test(h)) return true;
             return /\.local$/.test(h) || /\.internal$/.test(h);
         } catch (e) { return true; }
     }
@@ -1114,28 +1117,41 @@ var App = (function () {
 
         Store.knownAddrsGet(function (known) {
             var base = "coins relevant:true tokenid:" + tokenid;
-            MDS.cmd(base, function (j) {
-                if (j && j.status && Array.isArray(j.response)) { pre.innerText = coinDumpText(j.response, known, false); return; }
-                MDS.cmd(base + " sendable:true", function (j2) {
-                    pre.innerText = (j2 && j2.status && Array.isArray(j2.response))
-                        ? coinDumpText(j2.response, known, true)
-                        : "Couldn't load coins.";
+            MDS.cmd(base + " sendable:true", function (sj) {
+                var sendable = (sj && sj.status && Array.isArray(sj.response)) ? sendableIds(sj.response) : null;
+                MDS.cmd(base, function (j) {
+                    if (j && j.status && Array.isArray(j.response)) { pre.innerText = coinDumpText(j.response, known, false, sendable); return; }
+                    MDS.cmd(base + " sendable:true", function (j2) {
+                        pre.innerText = (j2 && j2.status && Array.isArray(j2.response))
+                            ? coinDumpText(j2.response, known, true, sendable)
+                            : "Couldn't load coins.";
+                    });
                 });
             });
         });
     }
-    function coinDumpText(coins, known, sendableOnly) {
+    function sendableIds(coins) {
+        var out = {}, i, id;
+        for (i = 0; i < (coins || []).length; i++) { id = coins[i] && coins[i].coinid; if (id) out[String(id)] = true; }
+        return out;
+    }
+    function coinDumpText(coins, known, sendableOnly, sendable) {
         if (!coins.length) return "No coins.";
         var rows = coins.slice().map(function (c) {
             var tid = c.tokenid || "0x00";
             var amt = PP.isMinima(tid) ? (c.amount || "0")
                                        : (c.tokenamount !== undefined ? c.tokenamount : (c.amount || "0"));
-            return { amt: PP.decOr(amt, 0), coinid: String(c.coinid || ""), tag: coinTag(c, known) };
+            return { amt: PP.decOr(amt, 0), coinid: String(c.coinid || ""), state: coinState(c, sendable), tag: coinTag(c, known) };
         });
         rows.sort(function (a, b) { return b.amt.cmp(a.amt); });
         var out = sendableOnly ? "(the node's reply was over its size cap — sendable coins only)\n\n" : "";
-        rows.forEach(function (r) { out += PP.tidy(r.amt) + r.tag + "\n" + r.coinid + "\n"; });
+        rows.forEach(function (r) { out += PP.tidy(r.amt) + r.state + r.tag + "\n" + r.coinid + "\n"; });
         return out.replace(/\n+$/, "");
+    }
+    /** Spendable/locked is straight from the node's own sendable set. Blank means the sendable query failed. */
+    function coinState(c, sendable) {
+        if (!sendable) return "";
+        return sendable[String(c.coinid || "")] ? "   spendable" : "   locked";
     }
     /** Why this coin isn't sendable: a pool reserve sits at its covenant address, a discovery beacon is dust
      *  at the shared sentinel. Anything untagged is locked by something else. */
@@ -1443,7 +1459,7 @@ var App = (function () {
         var art = /<artimage[^>]*>([\s\S]*?)<\/artimage>/i.exec(t);
         if (art) { var b64 = art[1].replace(/\s+/g, ""); if (b64.length > 16) return "data:image/jpeg;base64," + b64; }
         if (/^data:image\/(png|jpe?g|gif|webp|svg\+xml|x-icon|bmp);/i.test(t)) return t;
-        if (/^https?:\/\//i.test(t)) return t;
+        if (/^https?:\/\//i.test(t)) return blockedHost(t) ? null : t;
         if (/^<svg/i.test(t) && /<\/svg>\s*$/i.test(t)) {
             try { return "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(t))); } catch (e) { return null; }
         }

@@ -6,6 +6,29 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.17] — conservative history paging under the MDS reply cap
+
+- **Fixed** a stale assumption in `history.js` that MDS history backfill could safely start at `max:64`. The local Minima production reference documents the same 256 KB reply-cap class for MDS command replies, and an oversized page can be returned as empty/failed data. The MiniDapp now starts at `max:4` — the earlier measured safe page size — and keeps the adaptive halve/retry/max:1 skip logic.
+- **Fixed** the README/changelog wording that claimed `MDSCommandHandler` had no relevant size cap.
+
+## [0.6.16] — token-metadata network hardening parity
+
+- **Fixed** a native-parity security gap in the Wallet token icon path. Web-validation URLs were already blocked from loopback/LAN targets, but token icon URLs could still be passed directly to `<img src>`. The MiniDapp now rejects loopback, private, link-local, `.local`, and `.internal` HTTP(S) icon URLs before rendering them, matching the native `ImageLoader.isBlockedHost` intent and falling back to the deterministic identicon.
+
+## [0.6.15] — documentation/header parity polish for the native 0.9.23 line
+
+- **Fixed** stale MiniDapp metadata and documentation left over from the 0.6.0 parity milestone. The app is now documented as tracking native PandaPools **0.9.23**, not stopping at native 0.9.9.
+- **Fixed** the static header fallback version in `index.html` so a slow or failed init does not briefly show `v0.6.0`.
+- **Fixed** the README's obsolete "known limitation" claiming My Activity still used a bounded live history window. Since 0.6.10 it uses the permanent `pp_history` mirror and the per-pool statement reads that same mirror.
+- **Fixed** stale discovery documentation/comments that still described removed track-on-discovery. The docs now match the native 0.9.14+ model: owned contracts are re-tracked, other creators' pools come from the bounded registry window and re-announce mesh.
+
+## [0.6.14] — finish native 0.9.23 parity: MiniDapp-wide signing, shared coin locks, spendable coin tags
+
+- **Added** the native 0.9.22 serial signing gate to the MiniDapp transaction path: only one build → sign → check → post chain is allowed to run at once. Because MDS runs the page and background service in separate JavaScript contexts, the lock is SQL-backed (`pp_signlock`) with a heartbeat so it is genuinely MiniDapp-wide.
+- **Added** SQL-backed `pp_coinlocks`, the MDS equivalent of native `CoinLock`. Because the MDS page and background service run in separate JavaScript contexts, the reservation has to be shared through the MiniDapp database, not a local variable. UI swaps/LP actions and headless keep-fresh/re-announce now avoid selecting the same wallet funding coin.
+- **Fixed** headless keep-fresh/re-announce funding to exclude both the pool covenant address and `$OADR`, matching native 0.9.22's owner-key self-signing guard.
+- **Fixed** the Wallet coin detail list to mark each coin as `spendable` or `locked` from the node's own `sendable:true` set, matching native 0.9.21. Pool/beacon tags remain as the explanation layer.
+
 ## [0.6.11] — carry the owner key's signature count through backup and restore
 
 - **Fixed** the last key-reuse path (parity with native 0.9.23). A pool's owner key is minted with `newaddress`, so a seed-only re-sync doesn't bring it back — only the 64 defaults are rebuilt. `ensureOwnerKeys` re-mints it correctly, but the node inserts **every** new key at `uses = 0`, so the next owner action re-signed leaves the pre-restore node had already spent. Signing one Winternitz leaf twice leaks its private key.
@@ -18,7 +41,7 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 - **Added** `pp_history`: a permanent, txpowid-keyed mirror of the node's `history relevant:true`, the MiniDapp counterpart of the native app's `HistoryDb`. It accumulates and is never pruned — the node retains only a window, so once a transaction ages out of `history` this is the only remaining record of it. Closes deferred **#67**.
 - **Fixed** the Activity tab's one-shot `history max:4`, which showed about four transactions and could back nothing. It now reads the mirror, which `history.js` fills in the background with adaptive paging (backfill once, then incremental until it meets a transaction it already holds).
-- **Raised the page size 4 → 64.** The 256 KB reply cap is *not* a node limit — it lives in the Android broadcast receiver (`MinimaReceiver.MAX_MESSAGE_LEN`), so it binds the phone app and nothing else. `MDSCommandHandler` imposes no size limit and neither does the node core. The native app pages at `max:1` because an over-limit broadcast is an **uncatchable** Binder failure that kills the app; here the worst case is a page that doesn't arrive, which the adaptive halving recovers from. The page size is a throughput choice, not a safety constraint. Host-overridable via `MDS.historyPageMax` (minimaCore Desktop sets 512 — straight HTTP RPC, no cap at all).
+- **Uses adaptive history paging.** The default page starts at `max:4`, then halves on failed pages and skips at `max:1` only if a single oversized txpow would otherwise stall the sync. Hosts that know their transport can safely carry larger replies may override via `MDS.historyPageMax`.
 - **Added** the **per-pool statement** (My LP → Export statement): what you put in, your own trades, what is in the pool now, and the profit — as CSV, downloadable or copyable. Ported from native 0.9.19/0.9.20 and verified to reproduce its figures exactly.
 - A routed swap is **split across the pools it actually touched**, measured as `Σ(outputs at pool) − Σ(inputs at pool)`, with the split checked against the wallet's own movement; a row that doesn't tie is flagged and excluded rather than mis-booked.
 - Two labelled profit figures — **pool profit (vs holding)** (fees minus impermanent loss) and **change in market value** (which includes MINIMA's own price move). Nothing is estimated: where a value can't be obtained the file says so.
