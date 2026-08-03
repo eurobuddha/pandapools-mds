@@ -1,8 +1,8 @@
 {
   "book.js": {
-    "mtime": 1785705961.7799878,
-    "ast_hash": "31bf46c519b9daa80a10dafa18552626",
-    "semantic_hash": ""
+    "mtime": 1784196211.6231654,
+    "ast_hash": "0da3dfcc797cade0b6ac5df88dccb712",
+    "semantic_hash": "0da3dfcc797cade0b6ac5df88dccb712"
   },
   "build.sh": {
     "mtime": 1785612651.116521,
@@ -30,8 +30,8 @@
     "semantic_hash": "07af211455349bc37e5c6f8d9e195c69"
   },
   "poolmgr.js": {
-    "mtime": 1785705118.6955473,
-    "ast_hash": "0512eeea707a5fad556e967c79b7243f",
+    "mtime": 1785665470.8310351,
+    "ast_hash": "8a4d2bb098e4df51fa91fe7266fbeb8e",
     "semantic_hash": ""
   },
   "router.js": {
@@ -40,9 +40,9 @@
     "semantic_hash": "ec71aa4efb09cba1af921e11bf9122df"
   },
   "service.js": {
-    "mtime": 1785705961.9636903,
-    "ast_hash": "ad80c7801c8be65eb5c348b32cfba88b",
-    "semantic_hash": ""
+    "mtime": 1784196353.7312953,
+    "ast_hash": "a26786c5aed9f56da20206c2c7ce4983",
+    "semantic_hash": "a26786c5aed9f56da20206c2c7ce4983"
   },
   "store.js": {
     "mtime": 1785612054.346022,
@@ -50,8 +50,8 @@
     "semantic_hash": ""
   },
   "CHANGELOG.md": {
-    "mtime": 1785706640.7482305,
-    "ast_hash": "77fd155b8406a724e4d6cb07e1a20fdb",
+    "mtime": 1785665738.0912094,
+    "ast_hash": "e98ec64efdd7cc3fdcd35d5253d5f4c4",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
@@ -60,13 +60,13 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1785706640.6218145,
-    "ast_hash": "d94a81d3a6dead389a584861f7901f23",
+    "mtime": 1783939070.7698305,
+    "ast_hash": "acc9af3ca689f056214eb8d87bdbb8ac",
     "semantic_hash": ""
   },
   "index.html": {
-    "mtime": 1785706640.4069457,
-    "ast_hash": "9330b200b52725b8689df70ce040c8fd",
+    "mtime": 1785665579.8456943,
+    "ast_hash": "e3f38c490f97610ba7039781728fddeb",
     "semantic_hash": ""
   },
   "favicon.png": {
@@ -80,8 +80,8 @@
     "semantic_hash": ""
   },
   "history.js": {
-    "mtime": 1785706640.5123324,
-    "ast_hash": "4adf029e6dc47f7a71ad6aabdc43fea1",
+    "mtime": 1785612712.6492267,
+    "ast_hash": "58b7efa62d41a898ad6d60f06bedc33e",
     "semantic_hash": ""
   },
   "statement.js": {
