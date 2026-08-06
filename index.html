@@ -128,7 +128,7 @@
 <script src="statement.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.17";
+var PANDAPOOLS_VERSION = "0.6.18";
 
 var App = (function () {
     var D = Decimal;
@@ -832,11 +832,19 @@ var App = (function () {
             } }
         ]);
     }
+    /** True when the hunt reported this pool's owner key as another seed's — signing is impossible here. */
+    function foreignKey(opk, unreachable) {
+        return !!(opk && unreachable && unreachable.indexOf(String(opk).toLowerCase()) !== -1);
+    }
+    var FOREIGN_KEY_MSG = "This pool's owner key belongs to a different seed — this node cannot sign for it. "
+        + "Manage this pool on the device/seed that created it.";
+
     function doMigrate(p, x, y) {
         busy = true; setStatus("lpStatus", "Migrating your pool…", "dim");
         var tl = PP.tokenLabel(p);
         // Self-heal the owner key before the owner-signed migrate (see confirmClose) — no-op if already held.
-        PoolMgr.ensureOwnerKeys([p.opk], function () {
+        PoolMgr.ensureOwnerKeys([p.opk], function (regen, unreachable) {
+        if (foreignKey(p.opk, unreachable)) { busy = false; setStatus("lpStatus", FOREIGN_KEY_MSG, "err"); return; }
         PoolMgr.migrate(p, x, y, {
             created: function (np, txpowid) {
                 np.tokName = p.tokName;
@@ -865,7 +873,8 @@ var App = (function () {
                 // Self-heal the owner key first: $OPK is a newaddress key (index >= 64) a seed-only restore
                 // regenerates ASYNCHRONOUSLY — withdrawing too soon after a restore fails with "Public Key not
                 // found". ensureOwnerKeys is a no-op when the key is already held (a single extra keys check).
-                PoolMgr.ensureOwnerKeys([p.opk], function () {
+                PoolMgr.ensureOwnerKeys([p.opk], function (regen, unreachable) {
+                if (foreignKey(p.opk, unreachable)) { busy = false; setStatus("lpStatus", FOREIGN_KEY_MSG, "err"); return; }
                 PoolMgr.close(p, {
                     ok: function (txpowid) {
                         Store.lpRemove(p.address); Store.actRecord("CLOSE", summary, txpowid, CURRENT_BLOCK);
@@ -1548,11 +1557,15 @@ var App = (function () {
             // $OADR is RETURN SIGNEDBY($OPK) → the auto sweep still needs the owner key. Regenerate any missing
             // owner keys first (no-op when already held) so an explicit Collect self-heals after a seed restore.
             var opks = recipes.map(function (r) { return r.opk; }).filter(Boolean);
-            PoolMgr.ensureOwnerKeys(opks, function () {
+            // A foreign-seed key doesn't abort the sweep — the OTHER pools' funds still move — it's just reported.
+            PoolMgr.ensureOwnerKeys(opks, function (regen, unreachable) {
+            var foreign = unreachable ? unreachable.length : 0;
+            var skipped = foreign === 0 ? "" : " (" + foreign + " owner key" + (foreign === 1 ? "" : "s")
+                    + " belong" + (foreign === 1 ? "s" : "") + " to a different seed — those pools can't sign here.)";
             PoolMgr.sweepOwnerFunds(oadrs, { swept: function (n, coins) {
-                openInfo("Collect withdrawn funds", n > 0
+                openInfo("Collect withdrawn funds", (n > 0
                     ? ("Moved withdrawn funds from " + n + " pool" + (n === 1 ? "" : "s") + " to your wallet.")
-                    : "Nothing to collect — no spendable funds are waiting at your pool payout addresses.");
+                    : "Nothing to collect — no spendable funds are waiting at your pool payout addresses.") + skipped);
                 if (n > 0) rescan(true);
             } });
             });
@@ -1582,8 +1595,13 @@ var App = (function () {
                 // This is what makes a later restore safe: without it the regenerated key resumes at leaf 0
                 // and re-signs leaves the pre-restore node already spent. Best-effort.
                 if (e.opk) {
-                    PoolMgr.readKeyUses(e.opk, function (uses) {
+                    PoolMgr.readKeyUses(e.opk, function (uses, kidx) {
                         if (uses !== null) { e.opkuses = uses; if (CURRENT_BLOCK > 0) e.atblock = CURRENT_BLOCK; }
+                        // v3: the key's derivation index — a restore's hunt becomes exact, and a backup
+                        // restored onto the WRONG seed is proven foreign with zero minted keys. Backfill
+                        // it locally too: a pre-v3 pool only reveals its index while the node still HOLDS
+                        // the key, and this backup is exactly that moment.
+                        if (kidx >= 0) { e.kidx = kidx; PoolMgr.rememberKidx(e.opk, kidx); }
                         afterCoins();
                     });
                 } else { afterCoins(); }
@@ -1594,7 +1612,7 @@ var App = (function () {
         MDS.cmd("coinexport coinid:" + coinid, function (j) { var r = j ? j.response : null; cb(r && r.data ? r.data : ""); });
     }
     function finishBackup(pools) {
-        var json = JSON.stringify({ pandapools_backup: 2, pools: pools }, null, 2);
+        var json = JSON.stringify({ pandapools_backup: 3, pools: pools }, null, 2);
         var body = document.createElement("div");
         var p = document.createElement("div"); p.className = "modal__desc";
         p.innerText = "Save this somewhere safe (a file, a note, cloud). To restore later, paste it into Restore on any device. Public data only — no seed.";
@@ -1689,6 +1707,9 @@ var App = (function () {
         var pools = root && root.pools;
         if (!root || !root.pandapools_backup || !Array.isArray(pools) || !pools.length) { statusEl.innerText = "No PandaPools pools found in that backup."; return; }
         statusEl.innerText = "Restoring " + pools.length + " pool" + (pools.length === 1 ? "" : "s") + "…";
+        // v3 backups carry each owner key's derivation index — remember them BEFORE the hunt so it can
+        // run exact (and prove a wrong-seed restore with zero minted keys).
+        pools.forEach(function (e) { if (e && e.opk && e.kidx >= 0) PoolMgr.rememberKidx(e.opk, e.kidx); });
         var total = pools.length, fin = 0, ok = 0;
         pools.forEach(function (e) {
             restoreOne(e, function (good) {
@@ -1697,15 +1718,23 @@ var App = (function () {
                     // Regenerate any missing owner keys ($OPK) — a seed-only restore doesn't bring newaddress keys
                     // back — so restored pools are actually closeable/collectable, not just re-tracked.
                     var opks = pools.map(function (x) { return x && x.opk; }).filter(Boolean);
-                    PoolMgr.ensureOwnerKeys(opks, function (regen) {
+                    PoolMgr.ensureOwnerKeys(opks, function (regen, unreachable) {
+                        var foreignSet = {};
+                        (unreachable || []).forEach(function (o) { foreignSet[o] = true; });
+                        var foreignNote = unreachable && unreachable.length
+                            ? " ! " + unreachable.length + " owner key" + (unreachable.length === 1 ? " was" : "s were")
+                                + " created under a DIFFERENT seed — this node cannot sign for those pools; restore"
+                                + " them on the device/seed that created them."
+                            : "";
                         statusEl.innerText = "Re-tracked " + ok + " of " + total + " pool" + (total === 1 ? "" : "s")
                             + (regen > 0 ? " (regenerated " + regen + " owner key" + (regen === 1 ? "" : "s") + ")" : "")
-                            + " — restoring key usage…";
+                            + foreignNote + " — restoring key usage…";
                         // A regenerated key comes back at uses = 0. Wind it forward to where it actually left
                         // off BEFORE anything can sign with it — that ordering is the whole fix.
-                        advanceRestoredKeys(pools, 0, function (warn) {
+                        advanceRestoredKeys(pools, 0, foreignSet, function (warn) {
                             statusEl.innerText = "Re-tracked " + ok + " of " + total + " pool" + (total === 1 ? "" : "s")
                                 + (regen > 0 ? " (regenerated " + regen + " owner key" + (regen === 1 ? "" : "s") + ")" : "")
+                                + foreignNote
                                 + (warn ? " — " + warn : " — if your node prompts, approve the pending actions.")
                                 + " Re-scanning…";
                             rescan(true);
@@ -1721,16 +1750,24 @@ var App = (function () {
 
     /** Wind each restored owner key forward to the count it had reached. Sequential on purpose — each pass
      *  burns real signatures, and firing them concurrently is the pattern that caused reuse in the first
-     *  place. Best-effort per pool, but every failure is REPORTED, never swallowed. */
-    function advanceRestoredKeys(pools, i, done) {
+     *  place. Best-effort per pool, but every failure is REPORTED, never swallowed. Keys the hunt proved
+     *  to be another seed's ({@code foreignSet}) are skipped — there is nothing to advance on this node
+     *  and never will be; their count is already in the status line. */
+    function advanceRestoredKeys(pools, i, foreignSet, done) {
         if (i >= pools.length) { done(null); return; }
         var e = pools[i];
-        var next = function (w) { advanceRestoredKeys(pools, i + 1, w ? function (x) { done(w); } : done); };
-        if (!e || !e.opk) { advanceRestoredKeys(pools, i + 1, done); return; }
+        if (!e || !e.opk) { advanceRestoredKeys(pools, i + 1, foreignSet, done); return; }
         var label = PP.shorten(e.addr || "pool");
+        if (foreignSet && foreignSet[String(e.opk).toLowerCase()]) {
+            // Skip SILENTLY: the foreign-seed count is already in the status line, and hijacking the
+            // single warn slot here would mask a later pool's security-critical "could not restore the
+            // owner key's usage" warning (the warn chain is first-set-wins).
+            advanceRestoredKeys(pools, i + 1, foreignSet, done);
+            return;
+        }
         if (e.opkuses === undefined) {
             // A pre-v2 backup carries no count. Say so rather than quietly resuming at leaf 0.
-            advanceRestoredKeys(pools, i + 1, function () {
+            advanceRestoredKeys(pools, i + 1, foreignSet, function () {
                 done("! " + label + ": this backup predates key-use tracking, so the owner key's signature "
                    + "count is unknown. Re-back-up now and avoid reusing this pool.");
             });
@@ -1738,8 +1775,8 @@ var App = (function () {
         }
         var target = PoolMgr.restoreTarget(e.opkuses, e.atblock || 0, CURRENT_BLOCK, USES_SLACK);
         PoolMgr.advanceKeyUses(e.opk, target, null, function (ok, finalUses, err) {
-            if (ok) { advanceRestoredKeys(pools, i + 1, done); return; }
-            advanceRestoredKeys(pools, i + 1, function () {
+            if (ok) { advanceRestoredKeys(pools, i + 1, foreignSet, done); return; }
+            advanceRestoredKeys(pools, i + 1, foreignSet, function () {
                 done("! " + label + ": could not restore the owner key's usage (" + err + "). Do not use this "
                    + "pool until that succeeds — signing now could expose the key.");
             });

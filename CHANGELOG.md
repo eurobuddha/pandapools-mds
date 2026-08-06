@@ -6,6 +6,14 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.18] — stop the runaway owner-key hunt (bounded, remembered, provable)
+- **Fixed** the owner-key hunt minting keys without limit (parity with native **0.9.24**). A backup restored from a different seed carries an `$OPK` this node can never derive, and every Withdraw/Migrate/Collect/restore re-burned up to 256 permanent wallet keys hunting it — there is no key-delete command. One foreign recipe also poisoned every Collect.
+- **Added** a persistent **hunt ledger** (`pp_kv` "opkhunt"): a lifetime cap of 256 mints per (seed-fingerprint, owner key), charged per REAL mint only — a failed `newaddress` (read-restricted dapp, locked vault) never charges — and persisted per mint so interrupted hunts resume with only their remainder. Re-seeding re-opens the budget deliberately.
+- **Added** `kidx` — the owner key's derivation index (`pp_kv` "opkidx", backup **format v3**) — captured free from `newaddress`'s `total` at create, stamped at backup, remembered on restore. Hunts become exact, and a wallet already past the index proves a foreign seed with **zero** mints. Values are hard-coerced (a malformed backup's `"kidx": null` must never brand a legitimate key foreign).
+- Unreachable keys are **reported, never retried**: Withdraw/Migrate abort with "this pool's owner key belongs to a different seed", Collect proceeds and says how many pools were skipped, restore counts them in the status line.
+- Hunts are **serialised**; hunt state loads via a single-flight, max-wins merge that only trusts confirmed reads (a transient SQL failure can't clobber the persisted ledger); a hard per-run mint backstop caps any single hunt at the deepest legitimate exact target.
+- The rules are byte-mirrored with the desktop copy; the native `HuntBudget` JVM suite (21 tests) is the spec, plus 28 end-to-end mock-node simulations of this exact JS (foreign 256-then-0, interrupted resume, locked vault, failed reads, malformed kidx, store races).
+
 ## [0.6.17] — conservative history paging under the MDS reply cap
 
 - **Fixed** a stale assumption in `history.js` that MDS history backfill could safely start at `max:64`. The local Minima production reference documents the same 256 KB reply-cap class for MDS command replies, and an oversized page can be returned as empty/failed data. The MiniDapp now starts at `max:4` — the earlier measured safe page size — and keeps the adaptive halve/retry/max:1 skip logic.
