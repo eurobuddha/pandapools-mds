@@ -82,6 +82,7 @@
         <button class="btn btn--primary btn--full" onclick="App.openCreate()">+ Create a pool</button>
         <button class="btn btn--ghost btn--full" onclick="App.openRecovery()">Back up / restore pools</button>
         <button class="btn btn--ghost btn--full" onclick="App.openStatement()">Export statement</button>
+        <button class="btn btn--ghost btn--full" onclick="App.openCalc()">Pool calculator</button>
         <div id="lpStatus" class="status status--dim"></div>
         <div id="lpList"></div>
     </section>
@@ -121,6 +122,7 @@
 <script src="mds.js"></script>
 <script src="covenant.js"></script>
 <script src="curve.js"></script>
+<script src="calc.js"></script>
 <script src="router.js"></script>
 <script src="book.js"></script>
 <script src="store.js"></script>
@@ -128,7 +130,7 @@
 <script src="statement.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.19";
+var PANDAPOOLS_VERSION = "0.6.20";
 
 var App = (function () {
     var D = Decimal;
@@ -603,6 +605,8 @@ var App = (function () {
         var kratio = kmin.gt(0) ? Curve.k(p).div(kmin) : new D(1);
         html += healthBar(kratio);
         html += actionRow(p, kratio);
+        // what-if: open the calculator seeded with THIS pool's live reserves (display only, nothing posted)
+        html += '<span class="pc-link" onclick="App.openCalc(\'' + p.address + '\')">What if the price moves?  Pool calculator ›</span>';
         html += '</div>';
         return html;
     }
@@ -1533,6 +1537,24 @@ var App = (function () {
         var close = openModal(title, body, null, [{ label: "OK", cls: "btn btn--primary", fn: function () { close(); } }]);
     }
 
+    // ================================================================ POOL CALCULATOR (what-if, display only)
+    /** The what-if calculator (parity with native PoolCalcDialog): a starting pool — seeded from a live pool when an
+     *  address is given — then move the price and see the reserves, ratio, value vs holding and fees on the curve.
+     *  Maths + form live in calc.js (byte-mirrored to Desktop). Nothing here touches the node or the chain. */
+    function openCalc(addr) {
+        var seed = addr ? poolByAddr(addr) : null;
+        var cs = getComputedStyle(document.documentElement);
+        function cv(n, fb) { var v = cs.getPropertyValue(n).trim(); return v || fb; }
+        var f = PoolCalc.form({
+            x0: seed && seed.reserveM ? PP.plain(seed.reserveM) : "100000",
+            y0: seed && seed.reserveT ? PP.plain(seed.reserveT) : "500",
+            tok: seed ? PP.tokenLabel(seed) : "mxUSDT",
+            colors: { accent: cv("--accent", "#F7931A"), ink: cv("--heading", "#fff"), dim: cv("--dim", "#9A9AA8"), grid: cv("--border-light", "#2A2A38"), surface: cv("--surface2", "#1F1F2B"), font: cv("--sans", "sans-serif") }
+        });
+        var close = openModal("Pool calculator", f.el, function () { f.el.parentNode.classList.add("modal--wide"); f.render(); },
+            [{ label: "Done", cls: "btn btn--primary", fn: function () { close(); } }]);
+    }
+
     // ================================================================ RECOVERY (Layers 3/4)
     function openRecovery() {
         var body = document.createElement("div");
@@ -1813,7 +1835,7 @@ var App = (function () {
         rescan: rescan, confirmSwap: confirmSwap,
         openCreate: openCreate, openAdd: openAdd, openMigrate: openMigrate, confirmClose: confirmClose, dismissPending: dismissPending,
         copyAddr: copyAddr, copyText: copyText, setScope: setScope, setPoolsMode: setPoolsMode, gotoActivity: gotoActivity, cycleTheme: cycleTheme,
-        openRecovery: openRecovery, openStatement: openStatement
+        openRecovery: openRecovery, openStatement: openStatement, openCalc: openCalc
     };
 })();
 </script>
