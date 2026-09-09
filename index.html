@@ -128,9 +128,12 @@
 <script src="store.js"></script>
 <script src="history.js"></script>
 <script src="statement.js"></script>
+<script src="sha3.js"></script>
+<script src="receipt-recovery.js"></script>
+<script src="activity-chain.js"></script>
 <script src="poolmgr.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.21";
+var PANDAPOOLS_VERSION = "0.6.22";
 
 var App = (function () {
     var D = Decimal;
@@ -147,7 +150,7 @@ var App = (function () {
     var RECV_ADDR = "";
     var scanning = false, busy = false, posting = false;
     var activeView = "swap";
-    var showGlobal = false;
+    var showGlobal = false, activityShown = 60, activityPaint = 0;
 
     // swap pair state
     var pairPools = [], pairLabel = "token", minimaToToken = true;
@@ -188,6 +191,16 @@ var App = (function () {
         el("swapFlip").onclick = function () { minimaToToken = !minimaToToken; syncSwapLabels(); requote(); };
         el("swapAmount").addEventListener("input", requote);
         Store.init(function () {
+            ActivityChain.onChange(function () {
+                renderSwapRecent();
+                if (activeView === "activity") { if (showGlobal) renderGlobal(); else renderMyActivity(); }
+            });
+            ActivityChain.init(function () { ActivityChain.verify(); syncHistory(); });
+            setInterval(function () {
+                if (document.hidden) return;
+                ActivityChain.verify();
+                if (activeView === "activity") { syncHistory(); if (showGlobal) ActivityChain.syncPublic(false); }
+            }, 10000);
             MDS.cmd("block", function (r) { if (r.status && r.response) { CURRENT_BLOCK = parseInt(r.response.block) || 0; el("blockHeight").innerText = "#" + CURRENT_BLOCK; } });
             seedKnownFromOwn();
             loadKeys(function () { refreshBalance(); refreshMarket(); loadRecvAddr(); rescan(true); collectStuckOnLaunch(); });
@@ -457,7 +470,8 @@ var App = (function () {
         });
     }
     function renderSwapRecent() {
-        Store.actList(3, function (entries) {
+        ActivityChain.snapshot(function (snapshot) {
+            var entries = snapshot.rows.slice(0, 3).map(function (row) { return ActivityChain.rowModel(row, activityLabels()); });
             var host = el("swapRecent");
             if (!entries.length) { host.innerHTML = ""; return; }
             var html = '<div class="recent"><div class="recent__head">Recent activity</div>';
@@ -1178,114 +1192,53 @@ var App = (function () {
 
     // ================================================================ ACTIVITY
     function setScope(global) {
-        showGlobal = global;
+        showGlobal = global; activityShown = 60;
         el("actMineChip").classList.toggle("chip--active", !global);
         el("actGlobalChip").classList.toggle("chip--active", global);
         renderActivity();
     }
-    // HONEST CONFIRMATION (for a CREATE): a create shows "Confirming…" until we VERIFY its pool actually landed —
-    // its COVENANT ADDRESS holds both reserve legs on-chain. This is the DURABLE signal (the reserves persist for
-    // the pool's life), so — unlike checking transient output coins — it can't false-fail once wallet/change
-    // outputs get spent. If a create was mined then reorged out (common on a freshly-resynced node) its covenant
-    // stays empty, so after VERIFY_FAIL_BLOCKS we mark it "Not confirmed — coins returned", instead of the
-    // misleading "Confirmed" a pure block-count gave for a pool that doesn't exist. Once verified it's LATCHED
-    // (actSetStatus only touches still-'ok' rows), so a pool later closed/swapped stays "Confirmed".
-    var VERIFY_FAIL_BLOCKS = 12;
-    function verifyPendingActivity() {
-        if (CURRENT_BLOCK <= 0 || !Store.isReady()) return;
-        Store.actList(40, function (log) {
-            log.forEach(function (e) {
-                if (e.failed || e.confirmedOnchain || e.type !== "CREATE" || !e.refaddr || !e.txpowid) return;
-                MDS.cmd("coins address:" + e.refaddr, function (cr) {
-                    var cs = (cr && cr.status && Array.isArray(cr.response)) ? cr.response : [];
-                    var hasM = false, hasT = false;
-                    cs.forEach(function (c) {
-                        if (!c || c.spent === true) return;
-                        if (c.tokenid === "0x00") hasM = true; else hasT = true;
-                    });
-                    if (hasM && hasT) {                              // both reserve legs on-chain → pool landed
-                        Store.actSetStatus(e.txpowid, "confirmed", "");
-                        if (activeView === "activity") renderActivity();
-                    } else if (e.submitBlock > 0 && (CURRENT_BLOCK - e.submitBlock) > VERIFY_FAIL_BLOCKS) {
-                        Store.actSetStatus(e.txpowid, "failed", "Not confirmed on-chain — your coins are back in your wallet. Please try again.");
-                        if (activeView === "activity") renderActivity();
-                    }
-                });
-            });
-        });
+    function verifyPendingActivity() { ActivityChain.verify(); }
+    function renderActivity() {
+        ActivityChain.verify(); syncHistory();
+        if (showGlobal) { ActivityChain.syncPublic(false); renderGlobal(); } else renderMyActivity();
     }
-    function renderActivity() { if (showGlobal) renderGlobal(); else { syncHistory(); renderMyActivity(); } }
-    /** Top up the permanent history mirror in the background, then repaint if it grew. Cheap when caught up:
-     *  the incremental pass stops at the first transaction it already holds. */
     function syncHistory() {
         if (History.isRunning()) return;
-        History.sync(function (added) {
-            if (added > 0 && activeView === "activity" && !showGlobal) renderMyActivity();
+        History.sync(function () {
+            ActivityChain.verify();
+            if (activeView === "activity") { if (showGlobal) renderGlobal(); else renderMyActivity(); }
+            renderSwapRecent();
         });
     }
+    function activityLabels() {
+        var labels = {}; labels[USDT_TOKENID.toLowerCase()] = "USDT";
+        POOLS.forEach(function (p) { if (p && p.tok) labels[p.tok.toLowerCase()] = PP.tokenLabel(p); }); return labels;
+    }
+    function transactionDate(ms) { return ms > 0 ? new Date(Number(ms)).toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC") : "Time unknown"; }
+    function activityMore(total) { return total > activityShown ? '<button class="btn btn--outline btn--full" onclick="App.showMoreActivity()">Show more (' + (total - activityShown) + ' remaining)</button>' : ""; }
+    function showMoreActivity() { activityShown += 60; if (showGlobal) renderGlobal(); else renderMyActivity(); }
+    function activityBanner(snapshot) { var state = [snapshot.error, History.error()].filter(function (x) { return x; }).join(" · "); return state ? '<div class="view__sub">' + esc(state) + '</div>' : ""; }
     function renderMyActivity() {
-        Store.actList(60, function (log) {
-            // in-flight (not yet confirmed, or a recent failure) AND confirmed — both drawn from the ActivityLog
-            // so a confirmed swap KEEPS its amounts instead of vanishing the instant it confirms.
-            var inflight = log.filter(function (e) { return e.failed ? (Date.now() - e.ts < 6 * 3600000) : !Store.confirmed(e, CURRENT_BLOCK); });
-            var confirmedLog = log.filter(function (e) { return !e.failed && Store.confirmed(e, CURRENT_BLOCK); });
-            var shownTx = {};
-            var html = "";
-            if (inflight.length) {
-                html += '<div class="view__sub">In flight</div>';
-                inflight.forEach(function (e) { if (e.txpowid) shownTx[e.txpowid.toLowerCase()] = true; html += activityCard(e); });
-            }
-            if (confirmedLog.length) {
-                html += '<div class="view__sub">Confirmed</div>';
-                confirmedLog.forEach(function (e) { if (e.txpowid) shownTx[e.txpowid.toLowerCase()] = true; html += activityCard(e); });
-            }
-            renderOnchainHistory(html, shownTx);
+        var paint = ++activityPaint;
+        ActivityChain.snapshot(function (snapshot) {
+            if (paint !== activityPaint || showGlobal) return;
+            var labels = activityLabels(), ids = [], html = activityBanner(snapshot) + '<div class="view__sub">Transactions · newest first</div>';
+            snapshot.rows.slice(0, activityShown).forEach(function (row) {
+                var model = ActivityChain.rowModel(row, labels); ids.push(model.txpowid); html += activityCard(model);
+            });
+            ActivityChain.visible(ids);
+            if (!snapshot.rows.length) html += '<div class="empty">No pool transactions found yet.</div>';
+            el("actList").innerHTML = html + activityMore(snapshot.rows.length);
         });
     }
     function activityCard(e) {
-        var cls = e.failed ? "err" : Store.confirmed(e, CURRENT_BLOCK) ? "ok" : "warn";
-        var metaHtml = e.failed && e.failMsg ? esc(e.failMsg)
-            : (e.txpowid ? (txidChip(e.txpowid) + " · " + esc(rel(e.ts))) : esc(rel(e.ts)));
-        return '<div class="card"><div class="kv"><span class="kv__k" style="color:var(--heading);font-weight:700">' + esc(prettyType(e.type)) + '</span><span class="statuschip statuschip--' + cls + '">' + esc(Store.statusText(e, CURRENT_BLOCK)) + '</span></div>' +
-            '<div class="row__l1">' + esc(e.summary) + '</div><div class="row__l2">' + metaHtml + '</div></div>';
-    }
-    function renderOnchainHistory(prefix, shownTx) {
-        shownTx = shownTx || {};
-        // tokenid → label learned from the discovered pools, so an external on-chain swap names both legs
-        var labels = { "0x00": "MINIMA" };
-        POOLS.forEach(function (p) { if (p && p.tok) labels[p.tok] = PP.tokenLabel(p); });
-        // MY ACTIVITY = my PandaPools actions only. The node's `history` is the whole relevant wallet (plain
-        // sends, other dapps, strangers' swaps on pools I track), so keep only rows that touch a known pool
-        // covenant address AND moved my wallet (non-zero difference; a stranger swap nets to zero for me).
-        Store.knownAddrsGet(function (known) {
-            // Read from the PERMANENT mirror (pp_history), not a one-shot `history` call. The node retains only
-            // a window; this accumulates and is never pruned, so a transaction stays visible long after the node
-            // has forgotten it. History.sync() fills it in the background — see history.js (deferred #67).
-            Store.histAll(function (all) {
-                var rows = "";
-                try {
-                    all.slice().reverse().forEach(function (h) {          // newest first for display
-                        var txid = h.txpowid || "";
-                        if (!txid) return;
-                        if (shownTx[txid.toLowerCase()]) return;   // already shown above as a local ActivityLog entry
-                        var diff = null;
-                        try { diff = JSON.parse(h.deltas || "{}"); } catch (e) { return; }
-                        if (!movedWallet(diff)) return;            // net-zero for me (stranger swap / reshuffle)
-                        if (!histTouchesPanda(h, known)) return;   // not a PandaPools txn
-                        var legs = swapLegs(diff, labels);
-                        if (legs) {
-                            rows += '<div class="row"><span class="row__glyph">⇄</span><div class="row__mid"><div class="row__l1">' + esc(legs) + '</div><div class="row__l2">on-chain swap · ' + txidChip(txid) + '</div></div><div class="row__r">#' + esc(String(h.block)) + '</div></div>';
-                        } else {
-                            rows += '<div class="row"><span class="row__glyph">⟲</span><div class="row__mid"><div class="row__l1">' + txidChip(txid) + '</div><div class="row__l2">pool transaction</div></div><div class="row__r">#' + esc(String(h.block)) + '</div></div>';
-                        }
-                    });
-                } catch (e) {}
-                var html = prefix;
-                if (rows) html += '<div class="view__sub">Confirmed on-chain</div>' + rows;
-                if (!html) html = '<div class="empty">No activity yet.\nYour swaps, pool creates and withdrawals appear here.</div>';
-                el("actList").innerHTML = html;
-            });
-        });
+        var cls = e.failed ? "err" : Store.confirmed(e) ? "ok" : "warn";
+        var meta = (e.txpowid ? txidChip(e.txpowid) + " · " : "") + esc(e.timeLabel + " " + transactionDate(e.ts));
+        if (e.originalTxpowid && e.originalTxpowid.toLowerCase() !== String(e.txpowid).toLowerCase()) meta += '<br>Original submission ' + txidChip(e.originalTxpowid);
+        if (e.verifiedAt) meta += '<br>Checked ' + esc(transactionDate(e.verifiedAt));
+        if (e.failed && e.failMsg) meta += '<br>' + esc(e.failMsg);
+        return '<div class="card"><div class="kv"><span class="kv__k">' + esc(prettyType(e.type)) + '</span><span class="statuschip statuschip--' + cls + '">' + esc(Store.statusText(e)) + '</span></div>' +
+            '<div class="row__l1">' + esc(e.summary) + '</div><div class="row__l2">' + meta + '</div></div>';
     }
     /** Does this stored row touch a known pool covenant address? Same test as touchesPanda, but reading the
      *  normalised coin arrays kept in pp_history rather than a live txpow. */
@@ -1316,27 +1269,25 @@ var App = (function () {
         return false;
     }
     function renderGlobal() {
-        Store.feedList(100, function (events) {
-            if (!events.length) { el("actList").innerHTML = '<div class="empty">No pool activity seen yet.\nPool creations, swaps and withdrawals across all pools — including other people\'s — appear here as they happen.</div>'; return; }
-            var html = '<div class="view__sub">Live pool activity</div>';
-            events.forEach(function (ev) {
-                var m = trim(ev.minimaAmt), t = trim8(ev.tokenAmt), tl = ev.tokenLabel;
-                var poolTime = esc(PP.shorten(ev.pool)) + " · " + rel(ev.ts);
-                var glyph, desc, line2;
-                if (ev.kind === "CREATE") {
-                    glyph = "✦"; desc = "New pool · " + m + " MINIMA / " + t + " " + tl; line2 = poolTime;
-                } else if (ev.kind === "ADD") {
-                    glyph = "+"; desc = "Liquidity added · +" + m + " MINIMA / +" + t + " " + tl; line2 = poolTime;
-                } else if (ev.kind === "WITHDRAW") {
-                    glyph = "−"; desc = "Withdrawn · " + m + " MINIMA / " + t + " " + tl; line2 = poolTime;
-                } else {   // SWAP
-                    glyph = "⇄";
-                    desc = ev.minimaIn ? ("Sold " + m + " MINIMA → " + t + " " + tl) : ("Bought " + m + " MINIMA ← " + t + " " + tl);
-                    line2 = trim6(ev.price) + " " + esc(tl) + "/MINIMA · " + poolTime;
-                }
-                html += '<div class="row"><span class="row__glyph">' + glyph + '</span><div class="row__mid"><div class="row__l1">' + esc(desc) + '</div><div class="row__l2">' + line2 + '</div></div></div>';
+        var paint = ++activityPaint;
+        ActivityChain.snapshot(function (snapshot) {
+            Store.feedList(-1, function (observations) {
+                if (paint !== activityPaint || !showGlobal) return;
+                var html = activityBanner(snapshot) + '<div class="view__sub">Pool transactions · newest first</div>', labels = activityLabels(), ids = [];
+                snapshot.events.slice(0, activityShown).forEach(function (ev) {
+                    var action = ev.kind === "CREATE" ? "Pool creation" : ev.kind === "ADD" ? "Liquidity addition" : ev.kind === "WITHDRAW" ? "Liquidity withdrawal" : ev.kind === "SWAP" ? (ev.minimaIn ? "MINIMA sale" : "MINIMA purchase") : "Pool reserves changed";
+                    var h = ev.transaction; ids.push(h.txpowid);
+                    html += activityCard({ type: action, summary: ev.minimaAmt + " MINIMA / " + ev.tokenAmt + " " + (labels[String(ev.tokenid).toLowerCase()] || PP.shorten(ev.tokenid)), txpowid: h.txpowid, ts: h.timemilli, timeLabel: "Transaction", verifiedAt: h.verifiedAt, verifiedDepth: h.verifiedDepth });
+                });
+                ActivityChain.visible(ids);
+                if (!snapshot.events.length) html += '<div class="empty">No pool transactions found in this node’s retained history.</div>';
+                html += activityMore(snapshot.events.length);
+                if (observations.length) html += '<div class="view__sub">Previous local observations — inferred from scans, not verified transactions</div>';
+                observations.forEach(function (ev) {
+                    html += '<div class="row"><div class="row__mid"><div class="row__l1">' + esc(ev.kind + " observation · " + trim(ev.minimaAmt) + " MINIMA / " + trim8(ev.tokenAmt) + " " + ev.tokenLabel) + '</div><div class="row__l2">' + esc(PP.shorten(ev.pool) + " · Observed on this device " + transactionDate(ev.ts) + " · Transaction time unknown") + '</div></div></div>';
+                });
+                el("actList").innerHTML = html;
             });
-            el("actList").innerHTML = html;
         });
     }
     function gotoActivity() { document.querySelector('.tab[data-view="activity"]').click(); }
@@ -1834,7 +1785,7 @@ var App = (function () {
     return {
         rescan: rescan, confirmSwap: confirmSwap,
         openCreate: openCreate, openAdd: openAdd, openMigrate: openMigrate, confirmClose: confirmClose, dismissPending: dismissPending,
-        copyAddr: copyAddr, copyText: copyText, setScope: setScope, setPoolsMode: setPoolsMode, gotoActivity: gotoActivity, cycleTheme: cycleTheme,
+        copyAddr: copyAddr, copyText: copyText, setScope: setScope, setPoolsMode: setPoolsMode, gotoActivity: gotoActivity, showMoreActivity: showMoreActivity, cycleTheme: cycleTheme,
         openRecovery: openRecovery, openStatement: openStatement, openCalc: openCalc
     };
 })();

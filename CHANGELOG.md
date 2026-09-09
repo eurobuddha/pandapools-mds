@@ -6,6 +6,12 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.22] — Verified activity, receipt recovery and public pool history
+- Mirror Android activity fixes: real node confirmation counts, exact immutable transaction matching, cryptographic legacy receipt recovery, chronological receipt/history display and transaction timestamps in UTC.
+- Preserve all existing receipts, including old failures; add Show more. Stop inferred reserve-snapshot transaction claims and label preserved observations accurately.
+- Fetch actual public pool transactions separately from wallet accounting. Show read/lookup failures and keep incomplete history repair pending.
+- 18 regression tests pass against both engines; shared-file parity, frontend checks and H2/SQLite validation pass. See [review](REVIEW-0.6.22.md).
+
 ## [0.6.21] — Withdraw/Add/Migrate re-read the live pool coin (fixes "the pool moved")
 - **Fixed** Close/Withdraw (and Add, Migrate) failing with *"an input coin was already spent (the pool moved) — nothing was posted"* on an active pool (parity with native **0.9.36 / 0.9.40**). The MiniDapp spent the pool's coin ids cached at the last registry scan; any counterparty swap — or its own keep-fresh, which recreates the reserve coins ~every 900 blocks — spends and recreates those coins, so the cached id is a spent coin and the tx dies at `txncheck` (`mmrproofs=false`).
 - **Added** `readLiveReserves(p, done)` + a `withFreshCoins` prelude that re-reads the LIVE covenant coin (fresh `coinidM/coinidT` + reserve amounts) immediately before building close/add/migrate. Covenant params (`opk/oadr/tok/kmin/address`) are invariant across coin moves and left untouched. Close auto-retries **once** if the pool moves between the read and the post. Add re-derives the balanced token side from the live ratio so a swap in the dialog window can't push the deposit off-ratio.
