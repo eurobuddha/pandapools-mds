@@ -132,8 +132,9 @@
 <script src="receipt-recovery.js"></script>
 <script src="activity-chain.js"></script>
 <script src="poolmgr.js"></script>
+<script src="reserve-recovery.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.22";
+var PANDAPOOLS_VERSION = "0.6.23";
 
 var App = (function () {
     var D = Decimal;
@@ -272,8 +273,9 @@ var App = (function () {
     function maybeRefresh() {
         if (refreshChecked || !CURRENT_BLOCK) return;
         var aging = POOLS.filter(function (p) {
-            if (!p || !mine(p) || !Curve.funded(p) || !p.address || REFRESHED[p.address.toLowerCase()]) return false;
-            var age = (p.reserveBlock > 0) ? (CURRENT_BLOCK - p.reserveBlock) : Infinity;   // unknown age → refresh
+            if (!p || !mine(p) || !ReserveRecovery.complete(p) || !p.address || REFRESHED[p.address.toLowerCase()]) return false;
+            var oldest=Math.min(p.reserveBlockM||0,p.reserveBlockT||0);
+            var age = oldest>0 ? CURRENT_BLOCK-oldest : Infinity;   // unknown age → refresh
             return age > REFRESH_BLOCKS;
         });
         if (!aging.length) return;
@@ -537,36 +539,22 @@ var App = (function () {
     }
 
     // ================================================================ MY LP
-    function renderMyLp() {
-        var owned = POOLS.filter(mine);
-
-        // pending-create resolution
-        if (pendingCreate) {
-            var live = owned.some(function (p) { return p.address && p.address.toLowerCase() === pendingCreate.address.toLowerCase(); });
-            if (live) { setStatus("lpStatus", "Pool live ✓  MINIMA / " + pendingLabel + " is now earning fees.", "ok"); pendingCreate = null; }
-            else if (CURRENT_BLOCK > 0 && CURRENT_BLOCK - pendingBlock > 20) {
-                pendingCreate = null;
-                setStatus("lpStatus", "Your pool hasn't appeared after ~20 blocks — it may just be slow. Check the Activity tab; you can create again if needed.", "warn");
-            }
-        }
-
-        withSnapshots(owned, function () {
-            var host = el("lpList");
-            var html = "";
-            if (pendingCreate) html += confirmingCard();
-            if (!owned.length) {
-                el("lpValue").innerText = pendingCreate ? "Confirming…" : "No pools yet";
-                el("lpSub").innerText = pendingCreate ? "Your new pool is being written on-chain." :
-                    (Object.keys(MY_KEYS).length ? "Create a pool to start earning the swap fee." : "Pair the node to see your liquidity.");
-                host.innerHTML = html;
-                return;
-            }
-            var totalM = new D(0);
-            owned.forEach(function (p) { totalM = totalM.plus(PP.dec(p.reserveM)); });
-            el("lpValue").innerText = trim(totalM.times(2)) + " MINIMA";
-            el("lpSub").innerText = owned.length + (owned.length === 1 ? " pool" : " pools") + "  ·  ≈ value of both legs";
-            owned.forEach(function (p) { html += lpCard(p); });
-            host.innerHTML = html;
+    function renderMyLp(){
+        Store.ownAll(function(recipes,readOk){
+            var live=POOLS.filter(function(p){return mine(p)&&ReserveRecovery.complete(p);}),seen={};
+            live.forEach(function(p){seen[p.address.toLowerCase()]=true;});
+            var unresolved=recipes.filter(function(p){return !seen[p.address.toLowerCase()];});
+            if(pendingCreate&&seen[pendingCreate.address.toLowerCase()]){setStatus("lpStatus","Pool live ✓","ok");pendingCreate=null;}
+            withSnapshots(live,function(){
+                var html=pendingCreate?confirmingCard():"",totalM=new D(0),held={};
+                recipes.forEach(function(p){if((p.signingStateUnverified||Store.confirmationFailed(p.opk))&&!held[p.opk]){held[p.opk]=true;html+='<div class="card card--amber"><div class="card__title">Owner signing paused</div><p>Restore the latest complete wallet signing state and stop other signing copies.</p><div style="overflow-wrap:anywhere;user-select:text">'+esc(p.opk)+'</div>'+btn("Confirm wallet state","App.confirmSigning('"+p.opk+"')",false)+'</div>';}});
+                live.forEach(function(p){totalM=totalM.plus(PP.dec(p.reserveM));html+=lpCard(p);});
+                unresolved.forEach(function(p){html+='<div class="card card--amber"><div class="card__title">Saved pool · reserves unavailable</div><p>The recipe is retained. An empty local lookup does not prove funds were spent.</p><div style="overflow-wrap:anywhere;user-select:text">'+esc(p.address)+'</div>'+btn("Recover reserves","App.recoverSaved('"+p.address+"')",false)+'</div>';});
+                if(readOk===false)html+='<div class="card card--amber">Saved pool recipes could not be read. Retry when storage is available.</div>';
+                el("lpValue").innerText=live.length?trim(totalM)+" MINIMA":(unresolved.length?"Reserves unavailable":"No pools yet");
+                el("lpSub").innerText=live.length+" pools with verified reserves · "+unresolved.length+" saved pools unresolved";
+                el("lpList").innerHTML=html;
+            });
         });
     }
 
@@ -854,8 +842,7 @@ var App = (function () {
     function foreignKey(opk, unreachable) {
         return !!(opk && unreachable && unreachable.indexOf(String(opk).toLowerCase()) !== -1);
     }
-    var FOREIGN_KEY_MSG = "This pool's owner key belongs to a different seed — this node cannot sign for it. "
-        + "Manage this pool on the device/seed that created it.";
+    var FOREIGN_KEY_MSG = "Owner signing is paused or its current key state could not be verified. Open Pool recovery and confirm the latest complete wallet signing state.";
 
     function doMigrate(p, x, y) {
         busy = true; setStatus("lpStatus", "Migrating your pool…", "dim");
@@ -1510,12 +1497,13 @@ var App = (function () {
     function openRecovery() {
         var body = document.createElement("div");
         var p = document.createElement("div"); p.className = "modal__desc";
-        p.innerText = "Keep your pools recoverable on any node. A backup is PUBLIC DATA ONLY (addresses + coin proofs) — it holds no seed or private key, so it can never move your funds; you still need your seed to withdraw.";
+        p.innerText = ReserveRecovery.notice;
         body.appendChild(p);
         var close = openModal("Pool recovery", body, null, [
             { label: "Collect withdrawn funds", cls: "btn btn--primary", fn: function () { close(); doCollect(); } },
             { label: "Back up my pools", cls: "btn", fn: function () { close(); doBackup(); } },
             { label: "Restore from backup", cls: "btn", fn: function () { close(); openRestore(); } },
+            { label: "Recovery archive", cls: "btn", fn: function () { close(); archiveConnection(); } },
             { label: "How it works", cls: "btn", fn: function () { close(); showRecoveryGuide(); } },
             { label: "Close", cls: "btn btn--ghost", fn: function () { close(); } }
         ]);
@@ -1534,7 +1522,7 @@ var App = (function () {
             PoolMgr.ensureOwnerKeys(opks, function (regen, unreachable) {
             var foreign = unreachable ? unreachable.length : 0;
             var skipped = foreign === 0 ? "" : " (" + foreign + " owner key" + (foreign === 1 ? "" : "s")
-                    + " belong" + (foreign === 1 ? "s" : "") + " to a different seed — those pools can't sign here.)";
+                    + " paused or unavailable on this node.)";
             PoolMgr.sweepOwnerFunds(oadrs, { swept: function (n, coins) {
                 openInfo("Collect withdrawn funds", (n > 0
                     ? ("Moved withdrawn funds from " + n + " pool" + (n === 1 ? "" : "s") + " to your wallet.")
@@ -1545,50 +1533,18 @@ var App = (function () {
         });
     }
     // ---- backup: recipes + a fresh coinexport of each funded reserve coin → a portable JSON (native-compatible)
+    var recoveryBusy=false;
     function doBackup() {
-        Store.ownAll(function (recipes) {
-            if (!recipes.length) { openInfo("Back up pools", "No pools to back up yet — create a pool first."); return; }
-            var funded = {};
-            POOLS.forEach(function (p) { if (p && mine(p) && Curve.funded(p) && p.address) funded[p.address.toLowerCase()] = p; });
-            var pools = [], pending = recipes.length;
-            recipes.forEach(function (r) {
-                var e = { addr: r.address || "", mx: r.mxaddress || "", opk: r.opk || "", oadr: r.oadr || "",
-                          tok: r.tok || "", dec: (r.tokDecimals == null ? 8 : r.tokDecimals), kmin: r.kmin || "0", script: r.script || "" };
-                pools.push(e);
-                var f = funded[(r.address || "").toLowerCase()];
-                var afterCoins = function () {
-                    if (f && f.coinidM && f.coinidT) {
-                        exportCoin(f.coinidM, function (cm) {
-                            if (cm) e.cm = cm;
-                            exportCoin(f.coinidT, function (ct) { if (ct) e.ct = ct; if (--pending === 0) finishBackup(pools); });
-                        });
-                    } else if (--pending === 0) finishBackup(pools);
-                };
-                // Stamp the owner key's ACTUAL one-time-signature count (and the height it was read at).
-                // This is what makes a later restore safe: without it the regenerated key resumes at leaf 0
-                // and re-signs leaves the pre-restore node already spent. Best-effort.
-                if (e.opk) {
-                    PoolMgr.readKeyUses(e.opk, function (uses, kidx) {
-                        if (uses !== null) { e.opkuses = uses; if (CURRENT_BLOCK > 0) e.atblock = CURRENT_BLOCK; }
-                        // v3: the key's derivation index — a restore's hunt becomes exact, and a backup
-                        // restored onto the WRONG seed is proven foreign with zero minted keys. Backfill
-                        // it locally too: a pre-v3 pool only reveals its index while the node still HOLDS
-                        // the key, and this backup is exactly that moment.
-                        if (kidx >= 0) { e.kidx = kidx; PoolMgr.rememberKidx(e.opk, kidx); }
-                        afterCoins();
-                    });
-                } else { afterCoins(); }
-            });
+        if(recoveryBusy)return;recoveryBusy=true;
+        ReserveRecovery.backup(CURRENT_BLOCK,function(r){recoveryBusy=false;
+            if(r.error||r.empty){openInfo("Back up pools",r.error||"No saved pool recipes yet.");return;}
+            finishBackup(r.json);
         });
     }
-    function exportCoin(coinid, cb) {
-        MDS.cmd("coinexport coinid:" + coinid, function (j) { var r = j ? j.response : null; cb(r && r.data ? r.data : ""); });
-    }
-    function finishBackup(pools) {
-        var json = JSON.stringify({ pandapools_backup: 3, pools: pools }, null, 2);
+    function finishBackup(json) {
         var body = document.createElement("div");
         var p = document.createElement("div"); p.className = "modal__desc";
-        p.innerText = "Save this somewhere safe (a file, a note, cloud). To restore later, paste it into Restore on any device. Public data only — no seed.";
+        p.innerText = "Public pool recipes and optional proof snapshots. " + ReserveRecovery.notice;
         body.appendChild(p);
         var ta = document.createElement("textarea");
         ta.readOnly = true; ta.value = json;
@@ -1657,7 +1613,7 @@ var App = (function () {
     function openRestore() {
         var body = document.createElement("div");
         var p = document.createElement("div"); p.className = "modal__desc";
-        p.innerText = "Paste a PandaPools backup (or load a .json file). This re-tracks your pools on THIS node and re-imports the reserve coins so you can withdraw again — even on a brand-new node.";
+        p.innerText = "Restore public pool recipes and verify reserves on this node. Expired proofs need a synced MegaMMR archive. Owner signing stays paused until you confirm current wallet signing state.";
         body.appendChild(p);
         var fileIn = document.createElement("input"); fileIn.type = "file"; fileIn.accept = "application/json,.json"; fileIn.style.marginBottom = "8px"; fileIn.style.display = "block";
         body.appendChild(fileIn);
@@ -1674,119 +1630,48 @@ var App = (function () {
             { label: "Restore", cls: "btn btn--primary", fn: function () { doRestore(ta.value, status); } }
         ]);
     }
-    function doRestore(json, statusEl) {
-        var root;
-        try { root = JSON.parse(json); } catch (e) { statusEl.innerText = "That doesn't look like a PandaPools backup (invalid JSON)."; return; }
-        var pools = root && root.pools;
-        if (!root || !root.pandapools_backup || !Array.isArray(pools) || !pools.length) { statusEl.innerText = "No PandaPools pools found in that backup."; return; }
-        statusEl.innerText = "Restoring " + pools.length + " pool" + (pools.length === 1 ? "" : "s") + "…";
-        // v3 backups carry each owner key's derivation index — remember them BEFORE the hunt so it can
-        // run exact (and prove a wrong-seed restore with zero minted keys).
-        pools.forEach(function (e) { if (e && e.opk && e.kidx >= 0) PoolMgr.rememberKidx(e.opk, e.kidx); });
-        var total = pools.length, fin = 0, ok = 0;
-        pools.forEach(function (e) {
-            restoreOne(e, function (good) {
-                if (good) ok++;
-                if (++fin === total) {
-                    // Regenerate any missing owner keys ($OPK) — a seed-only restore doesn't bring newaddress keys
-                    // back — so restored pools are actually closeable/collectable, not just re-tracked.
-                    var opks = pools.map(function (x) { return x && x.opk; }).filter(Boolean);
-                    PoolMgr.ensureOwnerKeys(opks, function (regen, unreachable) {
-                        var foreignSet = {};
-                        (unreachable || []).forEach(function (o) { foreignSet[o] = true; });
-                        var foreignNote = unreachable && unreachable.length
-                            ? " ! " + unreachable.length + " owner key" + (unreachable.length === 1 ? " was" : "s were")
-                                + " created under a DIFFERENT seed — this node cannot sign for those pools; restore"
-                                + " them on the device/seed that created them."
-                            : "";
-                        statusEl.innerText = "Re-tracked " + ok + " of " + total + " pool" + (total === 1 ? "" : "s")
-                            + (regen > 0 ? " (regenerated " + regen + " owner key" + (regen === 1 ? "" : "s") + ")" : "")
-                            + foreignNote + " — restoring key usage…";
-                        // A regenerated key comes back at uses = 0. Wind it forward to where it actually left
-                        // off BEFORE anything can sign with it — that ordering is the whole fix.
-                        advanceRestoredKeys(pools, 0, foreignSet, function (warn) {
-                            statusEl.innerText = "Re-tracked " + ok + " of " + total + " pool" + (total === 1 ? "" : "s")
-                                + (regen > 0 ? " (regenerated " + regen + " owner key" + (regen === 1 ? "" : "s") + ")" : "")
-                                + foreignNote
-                                + (warn ? " — " + warn : " — if your node prompts, approve the pending actions.")
-                                + " Re-scanning…";
-                            rescan(true);
-                        });
-                    });
-                }
+    function doRestore(json,statusEl){
+        if(recoveryBusy)return;recoveryBusy=true;statusEl.innerText="Verifying pool recovery…";
+        ReserveRecovery.configuredArchive(function(archive){
+            ReserveRecovery.restore(json,archive,function(detail){statusEl.innerText=detail;},function(r){
+                recoveryBusy=false;statusEl.innerText="Verified reserves for "+r.restored+" of "+r.total+" pools.\n"+(r.details||[]).join("\n\n")+"\n"+(r.warn||"");
+                rescan(true);renderMyLp();
             });
         });
     }
-    /** Owner actions other than keep-fresh that could also have signed since the backup. Erring high
-     *  costs a leaf out of 262,144; falling short leaks the key. */
-    var USES_SLACK = 50;
-
-    /** Wind each restored owner key forward to the count it had reached. Sequential on purpose — each pass
-     *  burns real signatures, and firing them concurrently is the pattern that caused reuse in the first
-     *  place. Best-effort per pool, but every failure is REPORTED, never swallowed. Keys the hunt proved
-     *  to be another seed's ({@code foreignSet}) are skipped — there is nothing to advance on this node
-     *  and never will be; their count is already in the status line. */
-    function advanceRestoredKeys(pools, i, foreignSet, done) {
-        if (i >= pools.length) { done(null); return; }
-        var e = pools[i];
-        if (!e || !e.opk) { advanceRestoredKeys(pools, i + 1, foreignSet, done); return; }
-        var label = PP.shorten(e.addr || "pool");
-        if (foreignSet && foreignSet[String(e.opk).toLowerCase()]) {
-            // Skip SILENTLY: the foreign-seed count is already in the status line, and hijacking the
-            // single warn slot here would mask a later pool's security-critical "could not restore the
-            // owner key's usage" warning (the warn chain is first-set-wins).
-            advanceRestoredKeys(pools, i + 1, foreignSet, done);
-            return;
-        }
-        if (e.opkuses === undefined) {
-            // A pre-v2 backup carries no count. Say so rather than quietly resuming at leaf 0.
-            advanceRestoredKeys(pools, i + 1, foreignSet, function () {
-                done("! " + label + ": this backup predates key-use tracking, so the owner key's signature "
-                   + "count is unknown. Re-back-up now and avoid reusing this pool.");
-            });
-            return;
-        }
-        var target = PoolMgr.restoreTarget(e.opkuses, e.atblock || 0, CURRENT_BLOCK, USES_SLACK);
-        PoolMgr.advanceKeyUses(e.opk, target, null, function (ok, finalUses, err) {
-            if (ok) { advanceRestoredKeys(pools, i + 1, foreignSet, done); return; }
-            advanceRestoredKeys(pools, i + 1, foreignSet, function () {
-                done("! " + label + ": could not restore the owner key's usage (" + err + "). Do not use this "
-                   + "pool until that succeeds — signing now could expose the key.");
-            });
+    function recoverSaved(address){
+        Store.ownAll(function(ps){var p=ps.filter(function(r){return r.address.toLowerCase()===address.toLowerCase();})[0];
+            if(!p)return;var body=document.createElement("div"),status=document.createElement("div");status.style.whiteSpace="pre-wrap";body.appendChild(status);
+            var close=openModal("Recover reserves",body,null,[{label:"Done",cls:"btn",fn:function(){close();}}]);
+            doRestore(JSON.stringify({pandapools_backup:3,pools:[ReserveRecovery.entry(p)]}),status);
         });
     }
-
-    function restoreOne(e, cb) {
-        if (!e || !e.addr) { cb(false); return; }
-        Store.ownRecord({ address: e.addr, mxaddress: e.mx || "", opk: e.opk || "", oadr: e.oadr || "",
-                          tok: e.tok || "", tokDecimals: (e.dec == null ? 8 : e.dec), kmin: e.kmin || "0", covenantScript: e.script || "" });
-        Store.knownAddrsAdd([e.addr, e.mx]);
-        var script = (e.script && e.script.length) ? e.script
-                   : (e.opk && e.oadr && e.tok && e.kmin ? Covenant.script(e.opk, e.oadr, e.tok, e.kmin) : "");
-        if (!script) { cb(true); return; }   // recipe persisted; nothing more to re-track
-        MDS.cmd("newscript trackall:true script:" + Covenant.scriptArg(script), function () {
-            importCoin(e.cm, function () { importCoin(e.ct, function () { cb(true); }); });
+    function confirmSigning(opk){
+        var body=document.createElement("div");body.className="modal__desc";
+        body.innerText="Confirm only if this node has the latest complete MinimaCore wallet backup, including signing counters, and every other copy of this wallet has stopped signing. A seed or old backup is insufficient. This enables owner spending and automatic refresh for this key:\n"+opk;
+        body.style.overflowWrap="anywhere";
+        var close=openModal("Confirm current wallet signing state",body,null,[
+            {label:"Cancel",cls:"btn",fn:function(){close();}},
+            {label:"I confirm current wallet state",cls:"btn btn--primary",fn:function(){ReserveRecovery.confirmKey(opk,function(ok){close();openInfo("Wallet signing state",ok?"Confirmation saved. Owner signing enabled.":"Could not confirm current signing state. Signing remains paused.");renderMyLp();});}}
+        ]);
+    }
+    function archiveConnection(){
+        Store.kvGet("recovery_archive",function(url){
+            var body=document.createElement("div"),desc=document.createElement("div"),input=document.createElement("input");
+            desc.className="modal__desc";desc.innerText="Optional public HTTPS MegaMMR RPC endpoint that allows browser requests (CORS) for current reserve proofs. Your node validates every proof. Leave empty to use local MegaMMR or backup proofs.";
+            input.type="url";input.value=url;input.placeholder="https://archive.example.com";input.style.width="100%";body.appendChild(desc);body.appendChild(input);
+            var close=openModal("Recovery archive",body,null,[{label:"Cancel",cls:"btn",fn:function(){close();}},{label:"Save",cls:"btn btn--primary",fn:function(){ReserveRecovery.saveArchive(input.value,function(ok){if(ok){close();toast("Recovery archive saved.");}else desc.innerText="Could not save. Use a public HTTPS hostname without credentials, query or fragment.";});}}]);
         });
     }
-    function importCoin(data, next) {
-        if (!data) { next(); return; }
-        MDS.cmd("coinimport track:true data:" + data, function () { next(); });   // best-effort (proof may be stale/spent)
-    }
-    function showRecoveryGuide() {
-        openInfo("How pool recovery works",
-            "Your pools are recoverable at several levels:\n\n" +
-            "BELT — this app keeps a recipe for every pool you own (its covenant + params), so it can always find and re-track them.\n\n" +
-            "BRACES — on launch the background service re-tracks your pools, so a re-synced node rediscovers them automatically.\n\n" +
-            "SUSPENDERS — “Back up my pools” saves a file (recipe + coin proofs); “Restore” re-tracks and re-imports the coins on ANY node, even a brand-new one where the pool aged out.\n\n" +
-            "STRING (last resort) — your pools are locked to your Minima SEED (the covenant is SIGNEDBY your key). With your seed you can always resync a node and reclaim them.\n\n" +
-            "A backup is PUBLIC DATA ONLY — addresses and coin proofs, never your seed or keys. It cannot move funds; it only helps a node re-find and re-track your pools.");
+    function showRecoveryGuide(){
+        openInfo("How pool recovery works",ReserveRecovery.notice+"\n\nThe saved covenant recipe identifies your pool even when a light node no longer sees its coins. Restore verifies local reserves, then backup proofs, then current proofs from a synced MegaMMR archive. Missing reserves remain visible and are never reported as recovered.\n\nRestore does not regenerate keys or estimate past signature use. Confirm signing only with current complete wallet state and no other signing copies. Keep-fresh requires this app and node to remain running; it cannot guarantee availability while offline.");
     }
 
     return {
         rescan: rescan, confirmSwap: confirmSwap,
         openCreate: openCreate, openAdd: openAdd, openMigrate: openMigrate, confirmClose: confirmClose, dismissPending: dismissPending,
         copyAddr: copyAddr, copyText: copyText, setScope: setScope, setPoolsMode: setPoolsMode, gotoActivity: gotoActivity, showMoreActivity: showMoreActivity, cycleTheme: cycleTheme,
-        openRecovery: openRecovery, openStatement: openStatement, openCalc: openCalc
+        recoverSaved: recoverSaved, confirmSigning: confirmSigning, archiveConnection: archiveConnection, openRecovery: openRecovery, openStatement: openStatement, openCalc: openCalc
     };
 })();
 </script>
