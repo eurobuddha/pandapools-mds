@@ -31,7 +31,7 @@ Eleven shared engine files are byte-identical, including all new activity/recove
 
 - 18 regression tests pass against the MDS engine and against Desktop's copied engine (`tests/activity-chain.test.cjs`, set PP_ENGINE_ROOT for the latter).
 - The actual Android consolidation fixture reconstructs original ID `0x8C6B7401E1343318C7EC80563408C9978C40B7CA59EF76CE443EB0D2B68D27EB`. Altered headers, wrong mined hashes and malformed parents fail closed.
-- Tests cover immutable new-receipt matching, old receipts, 140 retained failures, verification across 200 history records, advancing proof data, not-found/reorg evidence, transport/malformed replies, public/wallet separation, SQL persistence/reload, incomplete pages, storage failure retention and MDS rendering.
+- Tests cover immutable new-receipt matching, old receipts, 140 retained failures, verification across 200 history records, not-found/reorg evidence, transport/malformed replies, public/wallet separation, SQL persistence/reload, incomplete pages, storage failure retention and MDS rendering.
 - Desktop parity/display check passes for real counts, withdrawal classification, UTC times, copyable original IDs, observation provenance and HTML escaping.
 - Successful SQL operations from the suite replay against Minima's H2 2.4.240 engine as well as Desktop sql.js.
 - Changed scripts and MDS inline scripts parse; git diff --check passes.
