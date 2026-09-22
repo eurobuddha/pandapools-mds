@@ -682,7 +682,10 @@ function strandWatchSvc(p, age, held) {
                  : "Your pool needs PandaPools open";
         var how = held ? "Withdraw it — its signing state was never confirmed, so it cannot refresh itself."
                        : "Open PandaPools and Re-publish it.";
-        MDS.notify(what + " (" + age + " blocks since its reserves were recreated). " + how + "  " + p.address);
+        // Guarded: this engine also runs inside the Desktop app, whose MDS shim is a small subset. An
+        // unguarded call would throw here and take the whole keep-fresh pass down with it.
+        var line = what + " (" + age + " blocks since its reserves were recreated). " + how + "  " + p.address;
+        if (typeof MDS.notify === "function") MDS.notify(line); else MDS.log("[strand] " + line);
         Store.kvSet(k, JSON.stringify({ level: level, at: now }), function () {});
     });
 }

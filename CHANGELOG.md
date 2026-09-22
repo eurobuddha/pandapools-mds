@@ -6,6 +6,9 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.27] — Guard the stranding notification for hosts without one
+- `strandWatchSvc` called `MDS.notify` unguarded. This engine also runs inside minimaCore Desktop, whose MDS shim is a small subset (`cmd`/`sql`/`log`/`init`/`net`) and has no `notify` — the call would have thrown inside the keep-fresh pass and taken refresh, stranding detection and the collect sweep down with it on every Desktop tick. It now falls back to `MDS.log`. Found by running the Desktop suite, not by reading the code.
+
 ## [0.6.26] — Catch up to native: the stranding fix, the collect queue, and a gate that names the problem
 - **The forward that stranded real funds is fixed here too (native 0.9.57).** `collectAfterClose` gave up after 8 tries 20 s apart, only while the tab was open — against coins that are not spendable until ~150 s after the close confirms — and it treated a forward that POSTED as the job being done. One forward moves only the coins it could see; on 2026-09-14 that was the MINIMA leg, and 2934.95626348 MxUSD was left behind. Payout addresses now go into a durable `pp_pendingcollect` queue **before** any forward is attempted, swept by the background service until the address reads **empty**. `PoolMgr.collectDecide` takes `(remaining, canSign)` and **no input describing a forward's outcome**, so the old assumption is no longer expressible. No attempt cap: giving up is what caused the incident.
 - **Funds that cannot be moved are said out loud.** If coins are present and this wallet cannot sign for the address — what a seed-only restore produces — MY LP shows it, names the address in full, and explains that a complete wallet backup is required. Previously silent.
