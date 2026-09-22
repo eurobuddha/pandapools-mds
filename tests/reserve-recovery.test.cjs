@@ -119,6 +119,96 @@ test('Book discovery populates both young reserve ages for the foreground refres
  const pools=await invoke(h.c.Book.scan);assert.equal(pools.length,1);assert.equal(pools[0].reserveBlockM,1998);assert.equal(pools[0].reserveBlockT,1999);assert(2000-Math.min(pools[0].reserveBlockM,pools[0].reserveBlockT)<900);assert(!h.trace.some(q=>q.startsWith('txnsign')));
  }finally{h.close();}
 });
+test('the signing gate names WHICH problem it is',async()=>{
+ // Collapsing six reasons into one "cannot sign" list sends users at the wrong fix: "restore a backup" is
+ // right for KEY_ABSENT and actively WRONG for NODE_UNREADABLE, where nothing at all is known.
+ const h=await harness();try{const R=h.c.ReserveRecovery;const p={opk,minimumOwnerUses:10,signingStateUnverified:false};
+ const row=u=>[{publickey:opk,uses:u}];
+ assert.equal(R.classifySigning(p,null),"NODE_UNREADABLE",'an unreadable reply is never evidence');
+ assert.equal(R.classifySigning(p,[]),"KEY_ABSENT",'parsed fine and not present ⇒ different wallet');
+ assert.equal(R.classifySigning(p,[{publickey:opk,uses:"nonsense"}]),"NODE_UNREADABLE",'unparsable uses is unknown, not zero');
+ assert.equal(R.classifySigning(p,row(262144)),"KEY_EXHAUSTED");
+ assert.equal(R.classifySigning(p,row(5)),"COUNTER_REGRESSED",'below the recorded floor is a signature spent elsewhere');
+ assert.equal(R.classifySigning(p,row(10)),null,'at the floor is allowed');
+ assert.equal(R.classifySigning({...p,signingStateUnverified:true},row(20)),"SIGNING_QUARANTINED");
+ assert.equal(R.classifySigning(p,row(20)),null);
+ assert(R.signingMessage("NODE_UNREADABLE",opk).includes("do not change anything"),
+   'the unknown case must NOT tell the user to restore anything');
+ assert(R.signingMessage("KEY_ABSENT",opk).includes("seed phrase alone"));
+ assert(R.signingMessage("COUNTER_REGRESSED",opk,5,10).includes("5")&&R.signingMessage("COUNTER_REGRESSED",opk,5,10).includes("10"),
+   'the regression message must quote both numbers');
+ for(const r of ["KEY_ABSENT","NODE_UNREADABLE","KEY_EXHAUSTED","COUNTER_REGRESSED","CONFIRMATION_UNSAVED","SIGNING_QUARANTINED"])
+   assert(R.signingMessage(r,opk).includes(opk),'every message carries the FULL owner key');
+ }finally{h.close();}
+});
+test('a backup is proven usable before it is handed over',async()=>{
+ const h=await harness();try{const R=h.c.ReserveRecovery;const owned=[{address:addr}];
+ assert.equal(R.verifyExport("",owned,0),"the saved file could not be read back");
+ assert.equal(R.verifyExport("not json",owned,0),"the saved file is not readable JSON");
+ assert.equal(R.verifyExport(JSON.stringify({pandapools_backup:3,pools:[]}),owned,0),"the saved file contains no pools");
+ assert.equal(R.verifyExport(JSON.stringify({pools:[{}]}),owned,0),"the saved file is not a PandaPools backup this version can read");
+ const good=JSON.stringify({pandapools_backup:3,pools:[R.entry(h.p)]});
+ assert.equal(R.verifyExport(good,owned,0),null,'a backup covering every owned pool is sound');
+ assert(R.verifyExport(good,[{address:'0x'+'9'.repeat(64)}],0).includes('does not contain'),
+   'a backup missing a pool you own must be refused — that is the failure you only discover during a recovery');
+ const bytes=new TextEncoder().encode(good).length;
+ assert.equal(R.verifyExport(good,owned,bytes),null);
+ assert.equal(R.verifyExport(good,owned,bytes+1),"the saved file is a different size than what was written — it may be truncated");
+ }finally{h.close();}
+});
+test('stranding warns early enough to act, and never on an unknown age',async()=>{
+ const h=await harness();try{const P=h.c.PoolMgr;
+ assert.equal(P.strandLevel(1),0);assert.equal(P.strandLevel(900),0,'the keep-fresh cadence itself is not a warning');
+ assert.equal(P.strandLevel(0),0,'age 0 is UNKNOWN, not urgent — escalating on it trains the warning out');
+ assert.equal(P.strandLevel(-5),0);
+ assert.equal(P.strandLevel(P.STRAND_NOTICE_AT),0);assert.equal(P.strandLevel(P.STRAND_NOTICE_AT+1),1);
+ assert.equal(P.strandLevel(P.STRAND_WARN_AT),1);assert.equal(P.strandLevel(P.STRAND_WARN_AT+1),2);
+ assert.equal(P.strandLevel(P.STRAND_URGENT_AT),2);assert.equal(P.strandLevel(P.STRAND_URGENT_AT+1),3);
+ assert(P.STRAND_NOTICE_AT<P.STRAND_WARN_AT&&P.STRAND_WARN_AT<P.STRAND_URGENT_AT&&P.STRAND_URGENT_AT<P.CASCADE_BLOCKS,
+   'urgent must arrive with room to act, not once the coins have aged out');
+ const NOW=1800000000000;
+ assert(P.strandShouldNotify(1,0,0,NOW),'first warning at any level is immediate');
+ assert(P.strandShouldNotify(2,1,NOW,NOW),'getting worse is announced at once');
+ assert(!P.strandShouldNotify(2,2,NOW,NOW+60000),'an unchanged level waits out the quiet window');
+ assert(P.strandShouldNotify(2,2,NOW,NOW+25*60*60*1000));
+ assert(!P.strandShouldNotify(1,3,NOW,NOW+9e9),'improving never nags');
+ assert(!P.strandShouldNotify(0,3,0,NOW),'a healed pool is never notified about');
+ }finally{h.close();}
+});
+test('a forward that moved only one leg does NOT finish the job',async()=>{
+ // THE INCIDENT THIS PINS. Pool MxG081BJGW3KQ0PBPHCS841CC5RA7YKRVEQUE93Z353MT4FBTJ2101S1423Z1ET closed on
+ // 2026-09-14 paying both legs to one $OADR. The forward ran while only the MINIMA leg met its coinage:3
+ // filter, moved that, reported success — and the retry loop stopped. 2934.95626348 MxUSD is still there,
+ // and the device holding the owner key has since died.
+ const h=await harness();try{const P=h.c.PoolMgr;
+ assert.equal(P.collectDecide(1,true),"RETRY",'coins present and signable ⇒ keep going, whatever a forward said');
+ assert.equal(P.collectDecide(0,true),"CLEAR");
+ assert.equal(P.collectDecide(0,false),"CLEAR");
+ assert.equal(P.collectDecide(0,null),"CLEAR",'an empty address is done regardless of signing');
+ for(let r=1;r<=50;r++)for(const sign of [true,false,null])
+   assert.notEqual(P.collectDecide(r,sign),"CLEAR",'coins present can never read as finished (remaining='+r+')');
+ assert.equal(P.collectDecide(null,true),"RETRY",'unknown is never a conclusion');
+ assert.equal(P.collectDecide(null,false),"RETRY");
+ assert.equal(P.collectDecide(2,null),"RETRY",'unknown signing is not "unreachable"');
+ assert.equal(P.collectDecide(1,false),"STRANDED",'present and unsignable needs a human, not silence');
+ assert.notEqual(P.collectDecide(0,false),"STRANDED");
+ assert.equal(P.collectDecide.length,2,'decide() must take ONLY (remaining, canSign) — a forward-outcome argument would make the original bug expressible again');
+ }finally{h.close();}
+});
+test('the collect queue is durable and only an empty read clears it',async()=>{
+ const h=await harness();try{const oadr='0x'+'e'.repeat(64);
+ assert(await invoke(cb=>h.c.Store.collectAdd(oadr,cb)));
+ assert(await invoke(cb=>h.c.Store.collectAdd(oadr,cb)),'idempotent — a re-close must not duplicate the job');
+ let q=await new Promise(r=>h.c.Store.collectAll(r));
+ assert.equal(q.length,1);assert.equal(q[0].oadr,oadr.toLowerCase());assert.equal(q[0].status,'RETRYING');
+ await invoke(cb=>h.c.Store.collectAttempted(oadr,'STRANDED','cannot sign',cb));
+ q=await new Promise(r=>h.c.Store.collectAll(r));
+ assert.equal(q[0].status,'STRANDED');assert.equal(q[0].attempts,1,'attempts are recorded, never used as a give-up cap');
+ await invoke(cb=>h.c.Store.collectClear(oadr,cb));
+ q=await new Promise(r=>h.c.Store.collectAll(r));
+ assert.equal(q.length,0);
+ }finally{h.close();}
+});
 test('one card per pool, carrying BOTH identifiers and the retire action',async()=>{
  // THE INCIDENT THIS PINS. A user with two healthy pools saw FOUR amber cards: two keyed by covenant
  // address, two by owner key, each a bare 0x… with no label. They are indistinguishable as raw hex, so

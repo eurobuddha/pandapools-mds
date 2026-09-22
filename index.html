@@ -134,7 +134,7 @@
 <script src="poolmgr.js"></script>
 <script src="reserve-recovery.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.25";
+var PANDAPOOLS_VERSION = "0.6.26";
 
 var App = (function () {
     var D = Decimal;
@@ -563,8 +563,23 @@ var App = (function () {
             var active=recipes.filter(function(p){return !p.retired;});
             var unresolved=keysKnown?active.filter(function(p){return !seen[p.address.toLowerCase()];}):[];
             if(pendingCreate&&seen[pendingCreate.address.toLowerCase()]){setStatus("lpStatus","Pool live ✓","ok");pendingCreate=null;}
+            Store.collectAll(function(collect){
             withSnapshots(live,function(){
                 var html=pendingCreate?confirmingCard():"",totalM=new D(0),held={},carded={};
+                // Withdrawn funds still sitting at a payout address. STRANDED means this wallet cannot sign
+                // for it at all — previously that state was entirely silent, which is how 2934.95626348 MxUSD
+                // sat unnoticed.
+                (collect||[]).forEach(function(c){
+                    var stranded=c.status==="STRANDED";
+                    html+='<div class="card'+(stranded?' card--amber':'')+'"><div class="card__title">'
+                        + (stranded?'Withdrawn funds cannot be moved from this address':'Withdrawn funds still being moved to your wallet')+'</div>'
+                        + '<p>'+(stranded
+                            ? 'This is the address your pool was closed to. PandaPools cannot move the funds because this wallet cannot sign for it &mdash; that address is not one of the 64 addresses a seed phrase rebuilds. Restore the matching complete wallet backup (the one from the device that owned the pool). A seed on its own will not do it.'
+                            : 'Your pool\'s withdrawal landed at its owner payout address and PandaPools is moving it into your wallet. It keeps trying in the background and stops only once the address is empty.')+'</p>'
+                        + '<div class="muted" style="overflow-wrap:anywhere;user-select:text">'+esc(c.oadr)+'</div>'
+                        + (c.lastError?'<p class="muted">'+esc(c.lastError)+'</p>':'')
+                        + btn(stranded?"Try again":"Collect now","App.collectNow()",false)+'</div>';
+                });
                 live.forEach(function(p){totalM=totalM.plus(PP.dec(p.reserveM));html+=lpCard(p);});
                 // ONE card per pool. These used to be two loops — one keyed by covenant address, one by owner
                 // key — so a single pool produced two cards showing two different bare 0x… values with no
@@ -604,6 +619,7 @@ var App = (function () {
                 el("lpValue").innerText=live.length?trim(totalM)+" MINIMA":(unresolved.length?"Reserves unavailable":"No pools yet");
                 el("lpSub").innerText=live.length+" pools with verified reserves · "+unresolved.length+" saved pools unresolved"+(gone.length?" · "+gone.length+" closed":"");
                 el("lpList").innerHTML=html;
+            });
             });
         });
     }
@@ -899,14 +915,26 @@ var App = (function () {
     function foreignKey(opk, unreachable) {
         return !!(opk && unreachable && unreachable.indexOf(String(opk).toLowerCase()) !== -1);
     }
+    // Last-resort wording only. "Paused OR could not be verified" merges two cases that need OPPOSITE advice:
+    // a quarantined key wants a wallet restore, an unreadable node reply wants the user to change NOTHING.
+    // blockedMsg asks the engine which it actually is and quotes the real numbers.
     var FOREIGN_KEY_MSG = "Owner signing is paused or its current key state could not be verified. Open Pool recovery and confirm the latest complete wallet signing state.";
+
+    function blockedMsg(opk, cb) {
+        try {
+            ReserveRecovery.classifyKeys([opk], function (blocked) {
+                var b = (blocked || []).filter(function (x) { return String(x.opk).toLowerCase() === String(opk).toLowerCase(); })[0];
+                cb(b && b.message ? b.message : FOREIGN_KEY_MSG);
+            });
+        } catch (e) { cb(FOREIGN_KEY_MSG); }
+    }
 
     function doMigrate(p, x, y) {
         busy = true; setStatus("lpStatus", "Migrating your pool…", "dim");
         var tl = PP.tokenLabel(p);
         // Self-heal the owner key before the owner-signed migrate (see confirmClose) — no-op if already held.
         PoolMgr.ensureOwnerKeys([p.opk], function (regen, unreachable) {
-        if (foreignKey(p.opk, unreachable)) { busy = false; setStatus("lpStatus", FOREIGN_KEY_MSG, "err"); return; }
+        if (foreignKey(p.opk, unreachable)) { busy = false; blockedMsg(p.opk, function (m) { setStatus("lpStatus", m, "err"); }); return; }
         PoolMgr.migrate(p, x, y, {
             created: function (np, txpowid) {
                 np.tokName = p.tokName;
@@ -940,15 +968,19 @@ var App = (function () {
                 // regenerates ASYNCHRONOUSLY — withdrawing too soon after a restore fails with "Public Key not
                 // found". ensureOwnerKeys is a no-op when the key is already held (a single extra keys check).
                 PoolMgr.ensureOwnerKeys([p.opk], function (regen, unreachable) {
-                if (foreignKey(p.opk, unreachable)) { busy = false; setStatus("lpStatus", FOREIGN_KEY_MSG, "err"); return; }
+                if (foreignKey(p.opk, unreachable)) { busy = false; blockedMsg(p.opk, function (m) { setStatus("lpStatus", m, "err"); }); return; }
                 PoolMgr.close(p, {
                     ok: function (txpowid) {
                         Store.lpRemove(p.address); Store.actRecord("CLOSE", summary, txpowid, CURRENT_BLOCK);
                         Store.setRetired(p.address, 1);   // hidden, never deleted; un-retired if the close never lands
+                        // Queue the payout address BEFORE attempting any forward, so a crash between the close
+                        // and the forward still leaves the job recorded. The background service finishes it and
+                        // keeps going until the address reads EMPTY.
+                        Store.collectAdd(closeOadr, function () {});
                         busy = false;
                         setStatus("lpStatus", "Pool closed ✓ " + PP.shorten(txpowid) + " — moving funds to a wallet address (confirming on-chain).", "ok");
                         rescan(true);
-                        collectAfterClose(closeOadr, 8);   // second hop: forward $OADR → a default-64 wallet address once confirmed
+                        PoolMgr.collectSweep(function () { rescan(true); });   // first pass now; the service keeps at it
                     },
                     fail: function (msg) { Store.actRecordFailed("CLOSE", summary, msg); busy = false; setStatus("lpStatus", "Close failed: " + msg, "err"); }
                 });
@@ -956,19 +988,11 @@ var App = (function () {
             });
     }
 
-    // After a close, the covenant→$OADR sweep is unconfirmed for ~a block; once it lands, forward those funds
-    // onward to a default-64 wallet address (so they survive a seed-only restore). Retries until the coins are
-    // sendable, or we run out of tries — the launch-time sweep (collectStuckOnLaunch) is the backstop.
-    function collectAfterClose(oadr, triesLeft) {
-        if (!oadr || triesLeft <= 0) return;
-        setTimeout(function () {
-            PoolMgr.forwardOwnerFunds(oadr, {
-                forwarded: function (txpowid, coins) { setStatus("lpStatus", "Withdrawn funds moved to your wallet ✓ " + PP.shorten(txpowid), "ok"); rescan(true); },
-                nothing: function () { collectAfterClose(oadr, triesLeft - 1); },
-                fail: function (msg) { collectAfterClose(oadr, triesLeft - 1); }
-            });
-        }, 20000);
-    }
+    // collectAfterClose(oadr, 8) lived here: 8 tries, 20 s apart, only while this screen was alive — a ~160 s
+    // budget against coins that are not spendable until ~150 s after the close confirms, and it treated a
+    // forward that POSTED as the job being done. Both mistakes stranded real funds. Replaced by the durable
+    // queue in pp_pendingcollect, swept by the background service until the address reads EMPTY.
+
 
     // Fund-safety launch sweep: forward any funds stranded at owner addresses ($OADR) onward to default-64
     // wallet addresses. No-op on a healthy node with nothing stranded (empty $OADR → no txn, no pending-sign
@@ -981,9 +1005,14 @@ var App = (function () {
         collectedOnLaunch = true;
         Store.ownAll(function (recipes) {
             if (!recipes || !recipes.length) return;
-            var oadrs = [];
-            recipes.forEach(function (r) { if (r.oadr) oadrs.push(r.oadr); });
-            PoolMgr.sweepOwnerFunds(oadrs, { swept: function (n, coins) { if (n > 0) rescan(true); } });
+            // Enqueue every known payout address, then sweep. Enqueuing is what makes this durable: a
+            // fire-and-forget sweep that runs once per launch cannot finish a job whose coins are not
+            // spendable yet, and that is precisely how funds get left behind.
+            var pending = recipes.length;
+            recipes.forEach(function (r) {
+                if (!r.oadr) { if (--pending === 0) PoolMgr.collectSweep(function (t) { if (t.cleared) rescan(true); }); return; }
+                Store.collectAdd(r.oadr, function () { if (--pending === 0) PoolMgr.collectSweep(function (t) { if (t.cleared) rescan(true); }); });
+            });
         });
     }
 
@@ -1600,13 +1629,21 @@ var App = (function () {
         if(recoveryBusy)return;recoveryBusy=true;
         ReserveRecovery.backup(CURRENT_BLOCK,function(r){recoveryBusy=false;
             if(r.error||r.empty){openInfo("Back up pools",r.error||"No saved pool recipes yet.");return;}
-            finishBackup(r.json);
+            // Prove the backup is usable BEFORE handing it over. Native reads the written file back
+            // (BackupState.verifyExport); a MiniDapp cannot see the file the browser saves, so it verifies the
+            // JSON it produced instead — which still catches the case that matters most: a backup that does
+            // not actually cover every pool you own. Say so rather than implying the saved file was checked.
+            Store.ownAll(function(owned){
+                var problem=ReserveRecovery.verifyExport(r.json,owned||[],0);
+                if(problem){openInfo("Do not rely on this backup","PandaPools built a backup but could not prove it is usable: "+problem+"\n\nNothing was saved. Try again, and if it repeats, report it before closing any pool.");return;}
+                finishBackup(r.json);
+            });
         });
     }
     function finishBackup(json) {
         var body = document.createElement("div");
         var p = document.createElement("div"); p.className = "modal__desc";
-        p.innerText = "Public pool recipes and optional proof snapshots. " + ReserveRecovery.notice;
+        p.innerText = "Public pool recipes and optional proof snapshots. Verified to contain a usable recipe for every pool you own — but PandaPools cannot see the file your browser saves, so check the download arrived intact. " + ReserveRecovery.notice;
         body.appendChild(p);
         var ta = document.createElement("textarea");
         ta.readOnly = true; ta.value = json;
@@ -1701,6 +1738,14 @@ var App = (function () {
             });
         });
     }
+    function collectNow(){
+        setStatus("lpStatus","Moving withdrawn funds…","");
+        PoolMgr.collectSweep(function(t){
+            setStatus("lpStatus", t.cleared?"Withdrawn funds moved to your wallet ✓":(t.stranded?"Cannot sign for that payout address — see the card.":"Still waiting for the withdrawn coins to become spendable."), t.stranded?"err":"ok");
+            renderMyLp(); rescan(true);
+        });
+    }
+
     function retirePool(address){
         Store.setRetired(address,1,function(){ setStatus("lpStatus","Put away. The recipe is still saved and still goes into your backups.","ok"); renderMyLp(); });
     }
@@ -1752,7 +1797,7 @@ var App = (function () {
         rescan: rescan, confirmSwap: confirmSwap,
         openCreate: openCreate, openAdd: openAdd, openMigrate: openMigrate, confirmClose: confirmClose, dismissPending: dismissPending,
         copyAddr: copyAddr, copyText: copyText, setScope: setScope, setPoolsMode: setPoolsMode, gotoActivity: gotoActivity, showMoreActivity: showMoreActivity, cycleTheme: cycleTheme,
-        recoverSaved: recoverSaved, retirePool: retirePool, showRetired: showRetired, confirmSigning: confirmSigning, archiveConnection: archiveConnection, openRecovery: openRecovery, openStatement: openStatement, openCalc: openCalc
+        recoverSaved: recoverSaved, collectNow: collectNow, retirePool: retirePool, showRetired: showRetired, confirmSigning: confirmSigning, archiveConnection: archiveConnection, openRecovery: openRecovery, openStatement: openStatement, openCalc: openCalc
     };
 })();
 </script>
