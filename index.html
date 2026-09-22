@@ -134,7 +134,7 @@
 <script src="poolmgr.js"></script>
 <script src="reserve-recovery.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.24";
+var PANDAPOOLS_VERSION = "0.6.25";
 
 var App = (function () {
     var D = Decimal;
@@ -252,13 +252,20 @@ var App = (function () {
                 // Backfill a recipe for a pool I own (my $OPK) but never recorded locally (e.g. created on
                 // another device) — once per session per address.
                 if (mine(p) && p.address && !ownBackfilled[p.address.toLowerCase()]) {
-                    ownBackfilled[p.address.toLowerCase()] = true;
-                    // mine(p) proved this node holds the pool's owner key and it is on chain in front of us,
-                    // so it was never imported. Say so, or ownRecord's "unknown provenance ⇒ hold" rule
-                    // (written for restored files) quarantines a pool the owner created themselves.
-                    p.signingStateUnverified = false;
+                    // Record the recipe — that is the valuable half — but do NOT claim provenance for it.
+                    // 0.6.24 set signingStateUnverified = false here, reasoning that mine(p) proves the pool
+                    // is ours. It proves this wallet HOLDS the key, not that it holds the NEWEST COUNTER. A
+                    // seed restore re-creates $OPK at uses = 0, mine(p) goes true, and clearing the hold lets
+                    // keep-fresh sign unattended at a leaf the previous device already spent — reuse, which
+                    // leaks the key. Erring high costs one card; erring low costs the pool.
                     Store.ownRecord(p);
-                    Store.setRetired(p.address, 0);   // visible on chain ⇒ not closed, whatever a past close assumed
+                    // Un-retire: visible on chain ⇒ not closed, whatever a past close assumed. Mark the
+                    // address done only once this SUCCEEDS — the flag is once-per-session, so latching it
+                    // before the write meant one transient failure left a live pool hidden for the whole
+                    // session with no retry. Native re-asserts this on every render; do the same here.
+                    Store.setRetired(p.address, 0, function(ok){
+                        if (ok) ownBackfilled[p.address.toLowerCase()] = true;
+                    });
                 }
             });
             Store.knownAddrsAdd(addrs);

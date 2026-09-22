@@ -6,6 +6,14 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.25] — Revert a signing-guard weakening that 0.6.24 introduced
+- **0.6.24 cleared the owner-key signing hold for any pool this node rediscovers on chain. That was wrong and this reverts it.** `mine(p)` proves this wallet HOLDS the key, not that it holds the NEWEST COUNTER — and at the backfill those are indistinguishable. A seed restore re-creates `$OPK` at `uses = 0`, so clearing the hold let keep-fresh sign **unattended** at leaves the previous device had already spent. Reusing a Winternitz leaf leaks that leaf's key. Erring high costs one card; erring low costs the pool.
+- The backfill still records the recipe — always the valuable half — it just no longer speaks for the counter.
+- `setRetired` now checks `recoveryReady` like every sibling, and **reads back** instead of trusting an `UPDATE` that matched zero rows (which still reports `status:true`), so a missing recipe no longer reports success.
+- The automatic un-retire marks an address done only once the write **succeeds**. The flag is once-per-session, so latching it beforehand meant one transient failure left a live pool hidden for the whole session with no retry.
+- The deleted burn path's rationale is rewritten. It still explained how to burn leaves to advance a counter, directly above the note saying never to do that — a future reader following the first paragraph would have rebuilt the footgun. The dead `KEYUSE_REFRESH_BLOCKS` went with it.
+- 25 tests pass.
+
 ## [0.6.24] — Stop alarming people about nothing
 - Mirrors native 0.9.58/0.9.59. A user with two healthy pools saw **four** amber cards: two "Owner signing paused" keyed by owner key, two "Saved pool · reserves unavailable" keyed by covenant address. Both rendered as a bare `0x…` with no label, and two identifier types that look identical is how one pool becomes two problems. There is now **one card per pool**, naming both identifiers as `Pool:` and `Owner key:`.
 - **Closed and migrated pools no longer haunt the list.** Close and migrate left their old recipe behind forever ("the OLD recipe is KEPT (harmless no-op)"), which stopped being harmless once unresolved recipes started rendering a card. Recipes are now **retired — hidden, never deleted**: `ownAll` still returns them so backups and key classification still see them, and the backfill un-retires one automatically if a scan finds the pool live again. A "Show closed pools" card lists them with a **Bring back** action.
