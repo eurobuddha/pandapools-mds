@@ -134,7 +134,7 @@
 <script src="poolmgr.js"></script>
 <script src="reserve-recovery.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.23";
+var PANDAPOOLS_VERSION = "0.6.24";
 
 var App = (function () {
     var D = Decimal;
@@ -253,7 +253,12 @@ var App = (function () {
                 // another device) — once per session per address.
                 if (mine(p) && p.address && !ownBackfilled[p.address.toLowerCase()]) {
                     ownBackfilled[p.address.toLowerCase()] = true;
+                    // mine(p) proved this node holds the pool's owner key and it is on chain in front of us,
+                    // so it was never imported. Say so, or ownRecord's "unknown provenance ⇒ hold" rule
+                    // (written for restored files) quarantines a pool the owner created themselves.
+                    p.signingStateUnverified = false;
                     Store.ownRecord(p);
+                    Store.setRetired(p.address, 0);   // visible on chain ⇒ not closed, whatever a past close assumed
                 }
             });
             Store.knownAddrsAdd(addrs);
@@ -543,16 +548,54 @@ var App = (function () {
         Store.ownAll(function(recipes,readOk){
             var live=POOLS.filter(function(p){return mine(p)&&ReserveRecovery.complete(p);}),seen={};
             live.forEach(function(p){seen[p.address.toLowerCase()]=true;});
-            var unresolved=recipes.filter(function(p){return !seen[p.address.toLowerCase()];});
+            // Only once ownership is actually known. MY_KEYS loads asynchronously, so an early render has
+            // mine(p) false for EVERYTHING — which would put every recipe in `unresolved` and raise a
+            // screenful of alarms about perfectly healthy pools. No keys, no conclusions.
+            var keysKnown=Object.keys(MY_KEYS).length>0;
+            var gone=recipes.filter(function(p){return p.retired;});
+            var active=recipes.filter(function(p){return !p.retired;});
+            var unresolved=keysKnown?active.filter(function(p){return !seen[p.address.toLowerCase()];}):[];
             if(pendingCreate&&seen[pendingCreate.address.toLowerCase()]){setStatus("lpStatus","Pool live ✓","ok");pendingCreate=null;}
             withSnapshots(live,function(){
-                var html=pendingCreate?confirmingCard():"",totalM=new D(0),held={};
-                recipes.forEach(function(p){if((p.signingStateUnverified||Store.confirmationFailed(p.opk))&&!held[p.opk]){held[p.opk]=true;html+='<div class="card card--amber"><div class="card__title">Owner signing paused</div><p>Restore the latest complete wallet signing state and stop other signing copies.</p><div style="overflow-wrap:anywhere;user-select:text">'+esc(p.opk)+'</div>'+btn("Confirm wallet state","App.confirmSigning('"+p.opk+"')",false)+'</div>';}});
+                var html=pendingCreate?confirmingCard():"",totalM=new D(0),held={},carded={};
                 live.forEach(function(p){totalM=totalM.plus(PP.dec(p.reserveM));html+=lpCard(p);});
-                unresolved.forEach(function(p){html+='<div class="card card--amber"><div class="card__title">Saved pool · reserves unavailable</div><p>The recipe is retained. An empty local lookup does not prove funds were spent.</p><div style="overflow-wrap:anywhere;user-select:text">'+esc(p.address)+'</div>'+btn("Recover reserves","App.recoverSaved('"+p.address+"')",false)+'</div>';});
+                // ONE card per pool. These used to be two loops — one keyed by covenant address, one by owner
+                // key — so a single pool produced two cards showing two different bare 0x… values with no
+                // label, and a user with two pools counted four problems.
+                unresolved.forEach(function(p){
+                    carded[p.address.toLowerCase()]=true;
+                    var hold=p.signingStateUnverified||Store.confirmationFailed(p.opk);
+                    if(hold)held[String(p.opk||"").toLowerCase()]=true;
+                    html+='<div class="card"><div class="card__title">Saved pool · reserves not found</div>'
+                        + ids(p)
+                        + '<p>This node cannot currently see both of this pool\'s reserve coins. That is what a pool '
+                        + 'that has been closed looks like, and also what one looks like on a node that is still '
+                        + 'catching up.</p>'
+                        + (hold?'<p>Owner signing is paused for it — confirming enables unlimited owner signing for that key.</p>':'')
+                        + btn("Check for reserves","App.recoverSaved('"+p.address+"')",false)
+                        + btn("It&rsquo;s closed &mdash; put it away","App.retirePool('"+p.address+"')",false)
+                        + (hold?btn("Confirm wallet signing state","App.confirmSigning('"+p.opk+"')",false):"")
+                        + '</div>';
+                });
+                if(keysKnown)active.forEach(function(p){
+                    if(!(p.signingStateUnverified||Store.confirmationFailed(p.opk)))return;
+                    if(carded[p.address.toLowerCase()])return;                       // already said on its card
+                    var k=String(p.opk||"").toLowerCase();
+                    if(!k||held[k])return;                                            // one card per key
+                    held[k]=true;
+                    html+='<div class="card card--amber"><div class="card__title">Owner signing paused</div>'
+                        + ids(p)
+                        + '<p>PandaPools cannot tell how many of this owner key\'s one-time signatures have already '
+                        + 'been used, so it has stopped signing for this pool. Automatic refresh is paused too.</p>'
+                        + btn("Confirm wallet signing state","App.confirmSigning('"+p.opk+"')",false)+'</div>';
+                });
+                if(gone.length)html+='<div class="card"><div class="card__title">'+gone.length+' closed pool(s) kept for recovery</div>'
+                    + '<p>Their recipes are still saved and still go into your backups &mdash; they are just out of the '
+                    + 'way. If a close never actually landed, the pool reappears here on its own.</p>'
+                    + btn("Show closed pools","App.showRetired()",false)+'</div>';
                 if(readOk===false)html+='<div class="card card--amber">Saved pool recipes could not be read. Retry when storage is available.</div>';
                 el("lpValue").innerText=live.length?trim(totalM)+" MINIMA":(unresolved.length?"Reserves unavailable":"No pools yet");
-                el("lpSub").innerText=live.length+" pools with verified reserves · "+unresolved.length+" saved pools unresolved";
+                el("lpSub").innerText=live.length+" pools with verified reserves · "+unresolved.length+" saved pools unresolved"+(gone.length?" · "+gone.length+" closed":"");
                 el("lpList").innerHTML=html;
             });
         });
@@ -626,6 +669,13 @@ var App = (function () {
             btn("Migrate", "App.openMigrate('" + id + "')", mustMigrate) +
             btn("Close", "App.confirmClose('" + id + "')", false) + '</div>';
     }
+    /** Both identifiers, always labelled and never abbreviated. Two bare 0x… values on two cards is what
+     *  made one pool look like two problems — an address and an owner key are indistinguishable as raw hex. */
+    function ids(p) {
+        return '<div class="muted" style="overflow-wrap:anywhere;user-select:text">Pool: ' + esc(p.address)
+            + (p.opk ? '<br>Owner key: ' + esc(p.opk) : '') + '</div>';
+    }
+
     function btn(label, onclick, primary) { return '<button class="btn ' + (primary ? "btn--primary" : "btn--outline") + '" onclick="' + onclick + '">' + label + '</button>'; }
     function poolByAddr(a) { for (var i = 0; i < POOLS.length; i++) if (POOLS[i].address === a) return POOLS[i]; return null; }
 
@@ -854,7 +904,11 @@ var App = (function () {
             created: function (np, txpowid) {
                 np.tokName = p.tokName;
                 Store.lpRecord(np.address, np.reserveM, np.reserveT, CURRENT_BLOCK);
-                Store.ownRecord(np);   // Layer 1: recipe for the NEW pool. The OLD recipe is KEPT (harmless no-op).
+                Store.ownRecord(np);   // Layer 1: recipe for the NEW pool.
+                // The OLD recipe is KEPT but RETIRED — hidden, never deleted, and un-retired automatically if a
+                // scan ever finds the old pool still live. "Harmless no-op" stopped being true once unresolved
+                // recipes started rendering a card of their own.
+                Store.setRetired(p.address, 1);
                 Store.knownAddrsAdd([np.address, np.mxaddress]);
                 Store.lpRemove(p.address);
                 Store.actRecord("MIGRATE", "Migrate MINIMA / " + tl + " pool  ·  new size " + trim(np.reserveM) + " MINIMA + " + trim(np.reserveT) + " " + tl, txpowid, CURRENT_BLOCK);
@@ -883,6 +937,7 @@ var App = (function () {
                 PoolMgr.close(p, {
                     ok: function (txpowid) {
                         Store.lpRemove(p.address); Store.actRecord("CLOSE", summary, txpowid, CURRENT_BLOCK);
+                        Store.setRetired(p.address, 1);   // hidden, never deleted; un-retired if the close never lands
                         busy = false;
                         setStatus("lpStatus", "Pool closed ✓ " + PP.shorten(txpowid) + " — moving funds to a wallet address (confirming on-chain).", "ok");
                         rescan(true);
@@ -1639,6 +1694,25 @@ var App = (function () {
             });
         });
     }
+    function retirePool(address){
+        Store.setRetired(address,1,function(){ setStatus("lpStatus","Put away. The recipe is still saved and still goes into your backups.","ok"); renderMyLp(); });
+    }
+
+    function showRetired(){
+        Store.ownAll(function(ps){
+            var gone=ps.filter(function(p){return p.retired;});
+            var body=document.createElement("div");
+            body.style.whiteSpace="pre-wrap"; body.style.overflowWrap="anywhere"; body.style.userSelect="text";
+            body.innerText=gone.map(function(p){return "Pool: "+p.address+(p.opk?"\nOwner key: "+p.opk:"");}).join("\n\n");
+            var close=openModal("Closed pools",body,null,[
+                {label:"Bring back",cls:"btn",fn:function(){
+                    var n=gone.length; if(!n){close();return;}
+                    gone.forEach(function(p){Store.setRetired(p.address,0,function(){ if(--n===0){close();renderMyLp();} });});
+                }},
+                {label:"Close",cls:"btn",fn:function(){close();}}]);
+        });
+    }
+
     function recoverSaved(address){
         Store.ownAll(function(ps){var p=ps.filter(function(r){return r.address.toLowerCase()===address.toLowerCase();})[0];
             if(!p)return;var body=document.createElement("div"),status=document.createElement("div");status.style.whiteSpace="pre-wrap";body.appendChild(status);
@@ -1671,7 +1745,7 @@ var App = (function () {
         rescan: rescan, confirmSwap: confirmSwap,
         openCreate: openCreate, openAdd: openAdd, openMigrate: openMigrate, confirmClose: confirmClose, dismissPending: dismissPending,
         copyAddr: copyAddr, copyText: copyText, setScope: setScope, setPoolsMode: setPoolsMode, gotoActivity: gotoActivity, showMoreActivity: showMoreActivity, cycleTheme: cycleTheme,
-        recoverSaved: recoverSaved, confirmSigning: confirmSigning, archiveConnection: archiveConnection, openRecovery: openRecovery, openStatement: openStatement, openCalc: openCalc
+        recoverSaved: recoverSaved, retirePool: retirePool, showRetired: showRetired, confirmSigning: confirmSigning, archiveConnection: archiveConnection, openRecovery: openRecovery, openStatement: openStatement, openCalc: openCalc
     };
 })();
 </script>

@@ -119,14 +119,58 @@ test('Book discovery populates both young reserve ages for the foreground refres
  const pools=await invoke(h.c.Book.scan);assert.equal(pools.length,1);assert.equal(pools[0].reserveBlockM,1998);assert.equal(pools[0].reserveBlockT,1999);assert(2000-Math.min(pools[0].reserveBlockM,pools[0].reserveBlockT)<900);assert(!h.trace.some(q=>q.startsWith('txnsign')));
  }finally{h.close();}
 });
-test('MDS and Desktop cards retain full unresolved address and recovery/signing actions',async()=>{
+test('one card per pool, carrying BOTH identifiers and the retire action',async()=>{
+ // THE INCIDENT THIS PINS. A user with two healthy pools saw FOUR amber cards: two keyed by covenant
+ // address, two by owner key, each a bare 0x… with no label. They are indistinguishable as raw hex, so
+ // one pool read as two problems. One card per pool now, and it must name which identifier is which.
  const h=await harness();try{h.p.signingStateUnverified=true;await invoke(h.c.Store.ownRecord,h.p);
  const donor=process.env.PP_MDS_ROOT||path.resolve(__dirname,'..');
  const html=fs.readFileSync(path.join(donor,'index.html'),'utf8'),elements={};
- Object.assign(h.c,{POOLS:[],pendingCreate:null,mine:()=>true,withSnapshots:(_ps,cb)=>cb(),D:h.c.Decimal,el:id=>elements[id]||(elements[id]={})});
- vm.runInContext(html.slice(html.indexOf('    function renderMyLp()'),html.indexOf('    function withSnapshots'))+'\n'+html.split('\n').find(l=>l.includes('function btn(label,'))+'\n'+html.split('\n').find(l=>l.includes('function esc(s)')),h.c);
- h.c.renderMyLp();const card=elements.lpList.innerHTML;assert(card.includes(addr));assert(card.includes('Recover reserves'));assert(card.includes('Owner signing paused'));assert.equal(elements.lpValue.innerText,'Reserves unavailable');
- const renderer=fs.readFileSync(path.join(desktop,'renderer/app.js'),'utf8'),c={TOK:{shortId:s=>s},esc:s=>String(s).replace(/</g,'&lt;'),short:s=>s};vm.createContext(c);vm.runInContext(renderer.slice(renderer.indexOf('function ppNum('),renderer.indexOf('function wirePpMineActions(')),c);
- const desktopCard=c.ppMineHtml([{address:addr,opk,tok,unresolved:true,signingStateUnverified:true}]);assert(desktopCard.includes(addr));assert(desktopCard.includes('data-pprecover'));assert(desktopCard.includes('data-ppconfirm'));assert(!desktopCard.includes('data-ppwd'));
+ Object.assign(h.c,{POOLS:[],pendingCreate:null,mine:()=>true,withSnapshots:(_ps,cb)=>cb(),D:h.c.Decimal,
+   MY_KEYS:{[opk.toLowerCase()]:true},el:id=>elements[id]||(elements[id]={})});
+ const idsFn=html.slice(html.indexOf('    function ids(p) {'),html.indexOf('    function btn(label, onclick, primary)'));
+ vm.runInContext(html.slice(html.indexOf('    function renderMyLp()'),html.indexOf('    function withSnapshots'))
+   +'\n'+idsFn
+   +'\n'+html.split('\n').find(l=>l.includes('function btn(label,'))
+   +'\n'+html.split('\n').find(l=>l.includes('function esc(s)')),h.c);
+ h.c.renderMyLp();const card=elements.lpList.innerHTML;
+ assert(card.includes(addr),'the full covenant address, never abbreviated');
+ assert(card.includes(opk),'the full owner key too — the other card used to carry this alone');
+ assert(card.includes('Pool:')&&card.includes('Owner key:'),'both identifiers must be LABELLED');
+ assert.equal(card.split('Saved pool').length-1,1,'exactly one card for one pool');
+ assert.equal(card.split('Owner signing paused').length-1,0,'the held state rides on that same card, not a second one');
+ assert(card.includes('Check for reserves'),'the read-only check stays available');
+ assert(card.includes('put it away'),'a closed pool must be dismissible without deleting its recipe');
+ assert(card.includes('Confirm wallet signing state'),'the held state is still surfaced');
+ assert.equal(elements.lpValue.innerText,'Reserves unavailable');
+ }finally{h.close();}
+});
+test('no cards at all until ownership is known',async()=>{
+ // MY_KEYS loads asynchronously and the view repaints from cache first, so an early render has mine(p)
+ // false for EVERYTHING — which would put every recipe in `unresolved` and alarm about healthy pools.
+ const h=await harness();try{h.p.signingStateUnverified=true;await invoke(h.c.Store.ownRecord,h.p);
+ const donor=process.env.PP_MDS_ROOT||path.resolve(__dirname,'..');
+ const html=fs.readFileSync(path.join(donor,'index.html'),'utf8'),elements={};
+ Object.assign(h.c,{POOLS:[],pendingCreate:null,mine:()=>false,withSnapshots:(_ps,cb)=>cb(),D:h.c.Decimal,
+   MY_KEYS:{},el:id=>elements[id]||(elements[id]={})});
+ const idsFn=html.slice(html.indexOf('    function ids(p) {'),html.indexOf('    function btn(label, onclick, primary)'));
+ vm.runInContext(html.slice(html.indexOf('    function renderMyLp()'),html.indexOf('    function withSnapshots'))
+   +'\n'+idsFn
+   +'\n'+html.split('\n').find(l=>l.includes('function btn(label,'))
+   +'\n'+html.split('\n').find(l=>l.includes('function esc(s)')),h.c);
+ h.c.renderMyLp();
+ assert.equal(elements.lpList.innerHTML,'','no keys, no conclusions');
+ }finally{h.close();}
+});
+test('retiring a pool hides it without losing anything needed to reclaim it',async()=>{
+ const h=await harness();try{await invoke(h.c.Store.ownRecord,h.p);
+ await invoke(cb=>h.c.Store.setRetired(h.p.address,1,cb));
+ const [rows]=await new Promise(r=>h.c.Store.ownAll((ps,ok)=>r([ps,ok])));
+ assert.equal(rows.length,1,'the recipe is HIDDEN, never deleted — it must still be in ownAll for backups');
+ assert.equal(rows[0].retired,true);
+ for(const f of ['address','opk','oadr','tok','kmin','script'])assert(rows[0][f],'retiring must not drop '+f);
+ await invoke(cb=>h.c.Store.setRetired(h.p.address,0,cb));
+ const [back]=await new Promise(r=>h.c.Store.ownAll((ps,ok)=>r([ps,ok])));
+ assert.equal(back[0].retired,false,'reversible: a posted close is not a landed close');
  }finally{h.close();}
 });

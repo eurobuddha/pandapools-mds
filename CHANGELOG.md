@@ -6,6 +6,14 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.24] — Stop alarming people about nothing
+- Mirrors native 0.9.58/0.9.59. A user with two healthy pools saw **four** amber cards: two "Owner signing paused" keyed by owner key, two "Saved pool · reserves unavailable" keyed by covenant address. Both rendered as a bare `0x…` with no label, and two identifier types that look identical is how one pool becomes two problems. There is now **one card per pool**, naming both identifiers as `Pool:` and `Owner key:`.
+- **Closed and migrated pools no longer haunt the list.** Close and migrate left their old recipe behind forever ("the OLD recipe is KEPT (harmless no-op)"), which stopped being harmless once unresolved recipes started rendering a card. Recipes are now **retired — hidden, never deleted**: `ownAll` still returns them so backups and key classification still see them, and the backfill un-retires one automatically if a scan finds the pool live again. A "Show closed pools" card lists them with a **Bring back** action.
+- **Rediscovering your own pool no longer quarantines it.** The backfill recorded a scanner-built pool with unknown provenance, so `ownRecord`'s "unknown ⇒ hold" rule — written for restored files — held a pool the owner created themselves.
+- **No cards at all until ownership is known.** `MY_KEYS` loads asynchronously and the view repaints from cache first, so an early render had `mine(p)` false for everything and alarmed about healthy pools.
+- **The leaf-burning path is deleted** (`restoreTarget` / `advanceKeyUses` / `burnTo` in `poolmgr.js`). It signed junk data with `sign publickey:` to push a Winternitz counter to a guessed target. Advancing a counter cannot undo signatures made elsewhere, and guessing the target is the leak. Native removed it in 0.9.48; it was unexported and uncalled here, so this removes a latent footgun.
+- 25 tests pass, including three that pin the merged card, the ownership gate, and that retiring keeps every field needed to reclaim the pool.
+
 ## [0.6.23] — Durable pool recovery and verified signing state
 - Keep unresolved owned pools visible with their full covenant address and a reserve-recovery action. Validate current local reserves, receiving-node coin proofs, and fresh MegaMMR proofs; failed imports never count as recovered.
 - Preserve recipes, observed key-use floors and reserve-ID hints. Backups re-read live coins and discard proofs if reserves move during export. Proofs expire; recovery requires current complete wallet signing state and available chain proofs.
