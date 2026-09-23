@@ -6,6 +6,11 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.28] — Say what recovery actually needs, instead of overstating it
+- Mirrors native 0.9.61. The recovery notice said *"a seed or recipe alone is insufficient"*, which reads as though seed **plus** recipe were also insufficient. It is not — that is the route used to recover a stranded pool on 2026-09-14, with no wallet backup for it.
+- It now names the two working routes: a current MinimaCore wallet backup (restores the owner key *and* its signature counter, so recovery just works), **or** the pool recipe plus your seed phrase (the recipe records which key the pool uses and what it had spent; recovery then ends with one node command that sets the counter). A seed phrase **alone** is still not enough, and that is now the part stated plainly.
+- Wording only — no behaviour change. 30 tests pass.
+
 ## [0.6.27] — Guard the stranding notification for hosts without one
 - `strandWatchSvc` called `MDS.notify` unguarded. This engine also runs inside minimaCore Desktop, whose MDS shim is a small subset (`cmd`/`sql`/`log`/`init`/`net`) and has no `notify` — the call would have thrown inside the keep-fresh pass and taken refresh, stranding detection and the collect sweep down with it on every Desktop tick. It now falls back to `MDS.log`. Found by running the Desktop suite, not by reading the code.
 
