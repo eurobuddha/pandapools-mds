@@ -6,6 +6,10 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.30] — Version-string sync
+- Identical code to 0.6.29. The 0.6.29 commit shipped without `PANDAPOOLS_VERSION` in `index.html` updated, which `build.sh`'s drift guard rightly refuses; this release carries the sync. 0.6.29 was never published — 0.6.30 is the artifact that ships the block-as-key-uses capacity fix.
+
+
 ## [0.6.29] — Judge key exhaustion by the key's own capacity (block-as-key-uses support)
 - Mirrors native 0.9.62. Upstream minima-core 1.1.2.31 introduces `-blockaskeyuses`: new keys are 128×4 Winternitz trees (268,435,456 one-time signatures) and `uses` tracks the chain-tip block number (~2.34M on mainnet). Every guard here compared `uses` to the legacy 262,144, so on a block-mode node (upstream's 1.7 Android app, our MinimaBlock app) a healthy key read as exhausted/unreadable and **all signing stopped**.
 - `classifySigning` now judges exhaustion against the key row's own `size^depth` (`capacityOfRow`, legacy 262,144 fallback); parse/sanity bounds in `validRecipe`, `entry`, `backup`, `PoolMgr.readKeyUses` and `Store` widen to the 128×4 maximum. Regression floor and quarantine semantics unchanged.
