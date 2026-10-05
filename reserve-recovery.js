@@ -10,6 +10,20 @@ var ReserveRecovery = (function () {
     function truth(v) { return v === true || v === "true"; }
     function good(j) { return !!j && truth(j.status) && !truth(j.pending); }
     function integer(v, max) { return (typeof v === "number" || typeof v === "string" && /^\d+$/.test(v)) && isFinite(Number(v)) && Number(v) >= 0 && Math.floor(Number(v)) === Number(v) && Number(v) <= max; }
+    // Legacy keys are 64x3 Winternitz trees (262,144 one-time signatures). Nodes running
+    // -blockaskeyuses (minima-core 1.1.2.31+) mint 128x4 trees (268,435,456) and a key's `uses`
+    // tracks the chain tip BLOCK NUMBER, so exhaustion must be judged against the key's OWN
+    // capacity (size^depth from its row), never the legacy literal - the legacy bound would brand
+    // every healthy block-mode key as spent and freeze ALL signing.
+    var LEGACY_TREE_USES = 262144, MAX_TREE_USES = 268435456;
+    function capacityOfRow(row) {
+        if (!row || !integer(row.size, 100000) || !integer(row.depth, 8)) return LEGACY_TREE_USES;
+        var size = Number(row.size), depth = Number(row.depth);
+        if (size <= 1 || depth <= 0) return LEGACY_TREE_USES;
+        var cap = 1;
+        for (var d = 0; d < depth; d++) { cap *= size; if (cap > MAX_TREE_USES) return MAX_TREE_USES; }
+        return cap;
+    }
     function rows(j) { return good(j) && Array.isArray(j.response) ? j.response : null; }
     function local(q, cb) { MDS.cmd(q, cb); }
     // Reuse ActivityChain's once-only, bounded callback wrapper. No timed-out operation is retried here.
@@ -20,7 +34,7 @@ var ReserveRecovery = (function () {
     }
     function validRecipe(e) {
         if (!e || !hash(e.addr) || !hash(e.opk) || !hash(e.oadr) || !hash(e.tok) || !integer(e.dec,44)) return false;
-        if (e.opkuses !== undefined && !integer(e.opkuses,262144)) return false;
+        if (e.opkuses !== undefined && !integer(e.opkuses,MAX_TREE_USES)) return false;
         if (typeof e.kmin !== "string" || e.kmin.length > 80 || !/^\d+(?:\.\d+)?$/.test(e.kmin)) return false;
         try {
             if (!new Decimal(e.kmin).gt(0) || !new Decimal(e.kmin).lt(Covenant.MININUMBER_MAX)) return false;
@@ -33,7 +47,7 @@ var ReserveRecovery = (function () {
     function pool(e) { return {address:e.addr,mxaddress:e.mx||"",opk:e.opk,oadr:e.oadr,tok:e.tok,tokDecimals:Number(e.dec),kmin:e.kmin,covenantScript:e.script,script:e.script,minimumOwnerUses:e.opkuses===undefined?-1:Number(e.opkuses)}; }
     function entry(p) {
         var e = {addr:p.address,mx:p.mxaddress||"",opk:p.opk,oadr:p.oadr,tok:p.tok,dec:p.tokDecimals==null?8:p.tokDecimals,kmin:String(p.kmin),script:p.covenantScript||p.script||Covenant.script(p.opk,p.oadr,p.tok,p.kmin)};
-        if (integer(p.minimumOwnerUses,262144)) e.opkuses=Number(p.minimumOwnerUses);
+        if (integer(p.minimumOwnerUses,MAX_TREE_USES)) e.opkuses=Number(p.minimumOwnerUses);
         return e;
     }
     function coinFor(p,c) {
@@ -197,7 +211,7 @@ var ReserveRecovery = (function () {
                 if(i===recipes.length){cb({json:JSON.stringify({pandapools_backup:3,recovery_notice:NOTICE,pools:out},null,2)});return;}
                 var p=recipes[i++],e=entry(p);out.push(e);
                 PoolMgr.readKeyUses(p.opk,function(uses,kidx){
-                    if(integer(uses,262144)){
+                    if(integer(uses,MAX_TREE_USES)){
                         e.opkuses=Math.max(Number(uses),p.minimumOwnerUses||0);p.minimumOwnerUses=e.opkuses;
                         if(height>0)e.atblock=height;
                         if(Number(uses)<e.opkuses)e.signing_warning="Node counter is below a recorded count.";
@@ -248,9 +262,9 @@ var ReserveRecovery = (function () {
         if(!Array.isArray(rs))return "NODE_UNREADABLE";                     // no key list ⇒ we know NOTHING
         var row=rs.filter(function(r){return key(r.publickey)===key(p.opk);})[0];
         if(!row)return "KEY_ABSENT";                                        // parsed fine, key is not here
-        if(!integer(row.uses,262144))return "NODE_UNREADABLE";              // present but unparsable is still unknown
+        if(!integer(row.uses,MAX_TREE_USES))return "NODE_UNREADABLE";       // present but unparsable is still unknown
         var uses=Number(row.uses);
-        if(uses>=262144)return "KEY_EXHAUSTED";                             // every one-time signature spent
+        if(uses>=capacityOfRow(row))return "KEY_EXHAUSTED";                 // every one-time signature spent
         if(p.minimumOwnerUses>=0&&uses<p.minimumOwnerUses)return "COUNTER_REGRESSED";
         if(typeof Store!=="undefined"&&Store.confirmationFailed(p.opk))return "CONFIRMATION_UNSAVED";
         if(p.signingStateUnverified)return "SIGNING_QUARANTINED";
@@ -267,7 +281,7 @@ var ReserveRecovery = (function () {
             case "NODE_UNREADABLE": return "PandaPools could not read this node's key list, so it does not know "
                 + "whether this key can sign. This says nothing about the key itself — do not change anything "
                 + "about your wallet on the strength of this message. Nothing was posted."+tail;
-            case "KEY_EXHAUSTED": return "This owner key has used all 262,144 of its one-time signatures and can "
+            case "KEY_EXHAUSTED": return "This owner key has used all of its one-time signatures and can "
                 + "never sign again. Any funds still held under it cannot be moved."+tail;
             case "COUNTER_REGRESSED": return "This node says the pool's owner key has used "+nodeUses+" one-time "
                 + "signatures, but your saved recipe recorded "+floor+". Signing here would reuse a signature and "

@@ -128,6 +128,11 @@ test('the signing gate names WHICH problem it is',async()=>{
  assert.equal(R.classifySigning(p,[]),"KEY_ABSENT",'parsed fine and not present ⇒ different wallet');
  assert.equal(R.classifySigning(p,[{publickey:opk,uses:"nonsense"}]),"NODE_UNREADABLE",'unparsable uses is unknown, not zero');
  assert.equal(R.classifySigning(p,row(262144)),"KEY_EXHAUSTED");
+ // Block-as-key-uses nodes (1.1.2.31+): 128x4 trees, uses track the chain tip block. A healthy
+ // block-mode key reporting millions of uses is NOT exhausted - its own capacity decides.
+ const blockrow=u=>[{publickey:opk,uses:u,size:128,depth:4}];
+ assert.equal(R.classifySigning(p,blockrow(2342219)),null,'a block-mode key at the chain tip may sign');
+ assert.equal(R.classifySigning(p,blockrow(268435456)),"KEY_EXHAUSTED",'a block-mode key judges against 128^4');
  assert.equal(R.classifySigning(p,row(5)),"COUNTER_REGRESSED",'below the recorded floor is a signature spent elsewhere');
  assert.equal(R.classifySigning(p,row(10)),null,'at the floor is allowed');
  assert.equal(R.classifySigning({...p,signingStateUnverified:true},row(20)),"SIGNING_QUARANTINED");

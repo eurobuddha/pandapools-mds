@@ -6,6 +6,13 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.29] — Judge key exhaustion by the key's own capacity (block-as-key-uses support)
+- Mirrors native 0.9.62. Upstream minima-core 1.1.2.31 introduces `-blockaskeyuses`: new keys are 128×4 Winternitz trees (268,435,456 one-time signatures) and `uses` tracks the chain-tip block number (~2.34M on mainnet). Every guard here compared `uses` to the legacy 262,144, so on a block-mode node (upstream's 1.7 Android app, our MinimaBlock app) a healthy key read as exhausted/unreadable and **all signing stopped**.
+- `classifySigning` now judges exhaustion against the key row's own `size^depth` (`capacityOfRow`, legacy 262,144 fallback); parse/sanity bounds in `validRecipe`, `entry`, `backup`, `PoolMgr.readKeyUses` and `Store` widen to the 128×4 maximum. Regression floor and quarantine semantics unchanged.
+- NOTE: a legacy pool's owner key cannot be re-derived from seed on a block-mode node (different tree shape ⇒ different public key). Close or migrate legacy pools from a legacy-mode node.
+- Tests: 29 pass in `tests/reserve-recovery.test.cjs` (new block-mode classify cases), 18 in `tests/activity-chain.test.cjs`.
+
+
 ## [0.6.28] — Say what recovery actually needs, instead of overstating it
 - Mirrors native 0.9.61. The recovery notice said *"a seed or recipe alone is insufficient"*, which reads as though seed **plus** recipe were also insufficient. It is not — that is the route used to recover a stranded pool on 2026-09-14, with no wallet backup for it.
 - It now names the two working routes: a current MinimaCore wallet backup (restores the owner key *and* its signature counter, so recovery just works), **or** the pool recipe plus your seed phrase (the recipe records which key the pool uses and what it had spent; recovery then ends with one node command that sets the counter). A seed phrase **alone** is still not enough, and that is now the part stated plainly.
