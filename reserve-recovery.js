@@ -21,6 +21,9 @@ var ReserveRecovery = (function () {
         var size = Number(row.size), depth = Number(row.depth);
         if (size <= 1 || depth <= 0) return LEGACY_TREE_USES;
         var cap = 1;
+        // Clamped at 128^4: upstream briefly built 192x4 trees (never released). A clamped
+        // capacity under-reports such a key and its uses beyond the parse bound read as
+        // unreadable - both fail CLOSED, the right direction for a signing guard.
         for (var d = 0; d < depth; d++) { cap *= size; if (cap > MAX_TREE_USES) return MAX_TREE_USES; }
         return cap;
     }
@@ -262,6 +265,10 @@ var ReserveRecovery = (function () {
         if(!Array.isArray(rs))return "NODE_UNREADABLE";                     // no key list ⇒ we know NOTHING
         var row=rs.filter(function(r){return key(r.publickey)===key(p.opk);})[0];
         if(!row)return "KEY_ABSENT";                                        // parsed fine, key is not here
+        // The parse bound is the LARGEST tree's capacity: a corrupt legacy counter in
+        // (262144, 268435456] reads KEY_EXHAUSTED rather than NODE_UNREADABLE - both fail
+        // closed, and for the common cause (a block-mode number on a legacy-shape row)
+        // "exhausted" is the actionable answer.
         if(!integer(row.uses,MAX_TREE_USES))return "NODE_UNREADABLE";       // present but unparsable is still unknown
         var uses=Number(row.uses);
         if(uses>=capacityOfRow(row))return "KEY_EXHAUSTED";                 // every one-time signature spent

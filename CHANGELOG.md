@@ -6,6 +6,10 @@ Versions `0.1.8` → `0.6.0` are a six-stage upgrade that brought the MiniDapp t
 
 ---
 
+## [0.6.31] — Document the capacity edge cases (mirrors native 0.9.63)
+- Comments only, no behaviour change: the 128^4 capacity clamp (for the never-released 192×4 interim tree shape) and why a corrupt legacy counter above 262,144 reads KEY_EXHAUSTED rather than NODE_UNREADABLE (both fail closed).
+
+
 ## [0.6.30] — Version-string sync
 - Identical code to 0.6.29. The 0.6.29 commit shipped without `PANDAPOOLS_VERSION` in `index.html` updated, which `build.sh`'s drift guard rightly refuses; this release carries the sync. 0.6.29 was never published — 0.6.30 is the artifact that ships the block-as-key-uses capacity fix.
 
