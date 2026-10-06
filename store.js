@@ -438,7 +438,7 @@ var Store = (function () {
     }
     // Called only after the owner's explicit current-wallet/other-signers attestation.
     function ownAcknowledge(opk,uses,cb){
-        if(!recoveryReady||!/^0x[0-9a-fA-F]{64}$/.test(opk)||!ReserveRecovery.integer(uses,262143)){cb(false);return;}
+        if(!recoveryReady||!/^0x[0-9a-fA-F]{64}$/.test(opk)||!ReserveRecovery.integer(uses,268435455)){cb(false);return;}
         var k=opk.toLowerCase();
         ownAll(function(ps,ok){
             var matching=ps.filter(function(p){return p.opk.toLowerCase()===k;});

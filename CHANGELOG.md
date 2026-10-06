@@ -1,3 +1,8 @@
+## 0.6.32
+
+- Complete block-mode capacity checks at the actual signing boundary and recovery confirmation. Preserve legacy exhaustion, counter floors and quarantine.
+- Clarify that pool seed recovery requires the original key mode.
+
 # Changelog
 
 All notable changes to the PandaPools MiniDapp. Newest first. Each release is tagged and its `.mds.zip` is attached to the corresponding [GitHub Release](../../releases).

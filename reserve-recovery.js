@@ -3,7 +3,7 @@
  * Recovery never regenerates keys, estimates historic leaf use, signs, or posts transactions.
  * Requires the existing Decimal, Covenant, Curve, Store and PoolMgr modules at call time. */
 var ReserveRecovery = (function () {
-    var NOTICE = "Keep ONE of these: a current MinimaCore wallet backup (restores the owner key and its signature counter \u2014 recovery just works), or this pool recipe plus your seed phrase (the recipe records which key the pool uses and what it had spent; recovery then ends with one node command that sets the counter). A seed phrase ALONE is not enough. Coin proofs expire; the recipe does not.";
+    var NOTICE = "Keep ONE of these: a current MinimaCore wallet backup (restores the owner key and its signature counter \u2014 recovery just works), or this pool recipe plus your seed phrase (the recipe records which key the pool uses and what it had spent; recovery then ends with one node command that sets the counter). Restore in the SAME key mode that created the pool: classic and block-mode seeds derive different owner keys. Close or migrate classic pools from a classic node before changing mode. A seed phrase ALONE is not enough. Coin proofs expire; the recipe does not.";
     function key(v) { return String(v || "").toLowerCase(); }
     function hex(v) { return typeof v === "string" && /^0x(?:[0-9a-fA-F]{2})+$/.test(v); }
     function hash(v) { return typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v); }
@@ -249,7 +249,7 @@ var ReserveRecovery = (function () {
     function keyRows(j){var r=j&&j.response;return good(j)?(Array.isArray(r)?r:r&&Array.isArray(r.keys)?r.keys:null):null;}
     function checkedKeys(wanted,j,ps){
         var rs=keyRows(j),missing={};wanted.forEach(function(k){if(k)missing[key(k)]=true;});
-        if(rs)rs.forEach(function(r){if(r&&integer(r.uses,262143))delete missing[key(r.publickey)];});
+        if(rs)rs.forEach(function(r){if(r&&integer(r.uses,MAX_TREE_USES)&&Number(r.uses)<capacityOfRow(r))delete missing[key(r.publickey)];});
         ps.forEach(function(p){if(wanted.map(key).indexOf(key(p.opk))<0)return;
             if(classifySigning(p,rs)!==null)missing[key(p.opk)]=true;
         });return Object.keys(missing);
@@ -376,7 +376,7 @@ var ReserveRecovery = (function () {
         Store.kvSet("recovery_archive",url,function(){Store.kvGet("recovery_archive",function(saved,ok){cb(ok!==false&&saved===url);});});
     }
     function confirmKey(opk,cb){
-        PoolMgr.readKeyUses(opk,function(uses){if(!integer(uses,262143)){cb(false);return;}Store.ownAcknowledge(opk,Number(uses),cb);});
+        PoolMgr.readKeyUses(opk,function(uses,kidx,capacity){if(!integer(uses,MAX_TREE_USES)||!(Number(uses)<capacity)){cb(false);return;}Store.ownAcknowledge(opk,Number(uses),cb);});
     }
     // Mirror core txnsign:auto: only actual simple script rows supply automatic signing keys.
     function checkSignature(ids,signer,cb){
@@ -400,5 +400,5 @@ var ReserveRecovery = (function () {
             });
         }call(local,"checkmode",function(j){if(!j||!j.response||j.response.writemode!==true){cb("Enable PandaPools WRITE mode in MiniHub before signing; deferred signature approvals are not supported.");return;}input(0);});
     }
-    return {restore:restore,backup:backup, verifyExport: verifyExport,entry:entry,readCurrent:readCurrent,readReserves:readReserves,recover:recover,validRecipe:validRecipe,complete:complete,fill:fill,coinFor:coinFor,integer:integer,ensureKeys:ensureKeys,classifyKeys:classifyKeys,classifySigning:classifySigning,signingMessage:signingMessage,checkSignature:checkSignature,configuredArchive:configuredArchive,validEndpoint:validEndpoint,allowedArchive:allowedArchive,saveArchive:saveArchive,confirmKey:confirmKey,notice:NOTICE};
+    return {capacityOfRow:capacityOfRow,restore:restore,backup:backup, verifyExport: verifyExport,entry:entry,readCurrent:readCurrent,readReserves:readReserves,recover:recover,validRecipe:validRecipe,complete:complete,fill:fill,coinFor:coinFor,integer:integer,ensureKeys:ensureKeys,classifyKeys:classifyKeys,classifySigning:classifySigning,signingMessage:signingMessage,checkSignature:checkSignature,configuredArchive:configuredArchive,validEndpoint:validEndpoint,allowedArchive:allowedArchive,saveArchive:saveArchive,confirmKey:confirmKey,notice:NOTICE};
 })();
