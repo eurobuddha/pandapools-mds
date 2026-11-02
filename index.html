@@ -84,7 +84,7 @@
         <button class="btn btn--ghost btn--full" onclick="App.openStatement()">Export statement</button>
         <button class="btn btn--ghost btn--full" onclick="App.openCalc()">Pool calculator</button>
         <div id="lpStatus" class="status status--dim"></div>
-        <div id="lpList"></div>
+        <div id="backupRequired" class="card card--amber" hidden><div class="card__title">Complete backup required</div><p>Save and verify your encrypted pool + node backup before creating or migrating another pool.</p><button class="btn" id="backupRequiredButton">Create backup</button></div><div id="lpList"></div>
     </section>
 
     <!-- WALLET -->
@@ -131,10 +131,13 @@
 <script src="sha3.js"></script>
 <script src="receipt-recovery.js"></script>
 <script src="activity-chain.js"></script>
+<script src="input-claims.js"></script>
 <script src="poolmgr.js"></script>
 <script src="reserve-recovery.js"></script>
+<script src="combined-backup.js"></script>
+<script src="full-backup.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.32";
+var PANDAPOOLS_VERSION = "0.6.34";
 
 var App = (function () {
     var D = Decimal;
@@ -473,7 +476,7 @@ var App = (function () {
                 el("swapAmount").value = "";
                 setStatus("swapStatus", "Swap posted ✓  " + PP.shorten(txpowid) + " — reserves update in ~1–2 blocks.", "ok");
                 el("swapBtn").disabled = false; el("swapBtn").innerText = "SWAP";
-                rescan(true);
+                rescan(true); doBackup();
             },
             fail: function (m) {
                 Store.actRecordFailed("SWAP", summary, m);
@@ -552,6 +555,7 @@ var App = (function () {
 
     // ================================================================ MY LP
     function renderMyLp(){
+        Store.combinedBackupReady(function(ok){el('backupRequired').hidden=ok;el('backupRequiredButton').onclick=doBackup;});
         Store.ownAll(function(recipes,readOk){
             var live=POOLS.filter(function(p){return mine(p)&&ReserveRecovery.complete(p);}),seen={};
             live.forEach(function(p){seen[p.address.toLowerCase()]=true;});
@@ -847,7 +851,7 @@ var App = (function () {
                 busy = false;
                 pendingCreate = pool; pendingBlock = CURRENT_BLOCK; pendingLabel = t.name;
                 setStatus("lpStatus", "Submitted ✓ " + PP.shorten(txpowid) + " — your pool is confirming on-chain (usually 1–3 blocks). It will appear below automatically.", "ok");
-                rescan(true);
+                rescan(true); doBackup();
             },
             fail: function (m) { Store.actRecordFailed("CREATE", "Create MINIMA / " + t.name + " pool", m); busy = false; setStatus("lpStatus", "Create failed: " + m, "err"); }
         });
@@ -947,7 +951,7 @@ var App = (function () {
                 Store.knownAddrsAdd([np.address, np.mxaddress]);
                 Store.lpRemove(p.address);
                 Store.actRecord("MIGRATE", "Migrate MINIMA / " + tl + " pool  ·  new size " + trim(np.reserveM) + " MINIMA + " + trim(np.reserveT) + " " + tl, txpowid, CURRENT_BLOCK);
-                busy = false; setStatus("lpStatus", "Migrated ✓ " + PP.shorten(txpowid) + " — confirming on-chain.", "ok"); rescan(true);
+                busy = false; setStatus("lpStatus", "Migrated ✓ " + PP.shorten(txpowid) + " — confirming on-chain.", "ok"); rescan(true); doBackup();
             },
             fail: function (msg) { Store.actRecordFailed("MIGRATE", "Migrate MINIMA / " + tl + " pool", msg); busy = false; setStatus("lpStatus", "Migrate failed: " + msg, "err"); }
         });
@@ -1542,7 +1546,7 @@ var App = (function () {
         var m = document.createElement("div"); m.className = "modal";
         var h = document.createElement("div"); h.className = "modal__title"; h.innerText = title; m.appendChild(h);
         m.appendChild(bodyNode);
-        function close() { if (ov.parentNode) ov.parentNode.removeChild(ov); }
+        function close() { if (bodyNode.onModalClose) { bodyNode.onModalClose(); bodyNode.onModalClose=null; } if (ov.parentNode) ov.parentNode.removeChild(ov); }
         if (buttons) {
             var acts = document.createElement("div"); acts.className = "modal__actions";
             buttons.forEach(function (b) { var btnEl = document.createElement("button"); btnEl.className = b.cls; btnEl.innerText = b.label; btnEl.onclick = b.fn; acts.appendChild(btnEl); });
@@ -1625,40 +1629,57 @@ var App = (function () {
     }
     // ---- backup: recipes + a fresh coinexport of each funded reserve coin → a portable JSON (native-compatible)
     var recoveryBusy=false;
-    function doBackup() {
-        if(recoveryBusy)return;recoveryBusy=true;
-        ReserveRecovery.backup(CURRENT_BLOCK,function(r){recoveryBusy=false;
-            if(r.error||r.empty){openInfo("Back up pools",r.error||"No saved pool recipes yet.");return;}
-            // Prove the backup is usable BEFORE handing it over. Native reads the written file back
-            // (BackupState.verifyExport); a MiniDapp cannot see the file the browser saves, so it verifies the
-            // JSON it produced instead — which still catches the case that matters most: a backup that does
-            // not actually cover every pool you own. Say so rather than implying the saved file was checked.
-            Store.ownAll(function(owned){
-                var problem=ReserveRecovery.verifyExport(r.json,owned||[],0);
-                if(problem){openInfo("Do not rely on this backup","PandaPools built a backup but could not prove it is usable: "+problem+"\n\nNothing was saved. Try again, and if it repeats, report it before closing any pool.");return;}
-                finishBackup(r.json);
-            });
+    function backupPassword(creating,use){
+        var body=document.createElement('div'),help=document.createElement('p');
+        help.textContent=creating?'This encrypted file includes your wallet keys. Use at least 12 characters, ideally random words. Keep the file and password safe; there is no password reset.':'Enter the password for your combined backup.';body.appendChild(help);
+        function field(label){var f=document.createElement('input');f.type='password';f.autocomplete='off';f.placeholder=label;f.className='input';f.style.width='100%';body.appendChild(f);return f;}
+        var first=field('Backup password'),second=creating?field('Repeat password'):null,error=document.createElement('p');body.appendChild(error);
+        var close=openModal(creating?'Required encrypted backup':'Open encrypted backup',body,null,[
+            {label:'Cancel',cls:'btn',fn:function(){first.value='';if(second)second.value='';close();}},
+            {label:creating?'Create backup':'Open backup',cls:'btn btn--primary',fn:function(){
+                var pass=first.value;if(creating&&(!PoolBackupBundle.validPassword(pass)||pass!==second.value)){error.textContent='Use at least 12 characters and enter the same password twice.';return;}
+                first.value='';if(second)second.value='';close();use(pass);
+            }}]);
+    }
+    function backupCmd(command){return new Promise(function(resolve,reject){MDS.cmd(command,function(r){if(r&&r.status===true&&!r.pending)resolve(r);else reject(Error('NODE_COMMAND_FAILED: the node did not confirm the backup operation. Check write permissions and storage.'));});});}
+    function backupFile(action,name){return new Promise(function(resolve,reject){MDS.file[action](name,function(r){if(r&&r.status===true)resolve(r.response);else reject(Error('NODE_FILE_UNAVAILABLE: could not access the native backup.'));});});}
+    function doBackup(){
+        if(recoveryBusy)return;
+        backupPassword(true,async function(pass){
+            recoveryBusy=true;var folder='';
+            try{
+                var captured=await FullBackup.capture({cmd:backupCmd,
+                    backup:function(){return new Promise(function(resolve,reject){ReserveRecovery.backup(CURRENT_BLOCK,function(r){if(r.json)resolve(r.json);else reject(Error(r.error||'No saved pools.'));});});},
+                    makeNode:async function(name,password){
+                        var r=await backupFile('getpath','/');folder=r&&r.getpath&&r.getpath.path;
+                        if(typeof folder!=='string'||!/^\/[A-Za-z0-9_./ -]+$/.test(folder))throw Error('NODE_PATH_UNSUPPORTED: cannot safely address the MiniDapp backup folder.');
+                        await backupCmd('backup file:"'+folder.replace(/\/$/,'')+'/'+name+'" password:'+password+' confirm:'+password);
+                    },
+                    readNode:async function(name){var r=await backupFile('loadbinary',name),hex=r&&r.load&&r.load.data;
+                        if(typeof hex!=='string'||!/^0x(?:[a-fA-F0-9]{2})+$/.test(hex)||hex.length>2+PoolBackupBundle.MAX_NODE*2)throw Error('NODE_BACKUP_INVALID');
+                        var bytes=new Uint8Array((hex.length-2)/2);for(var i=0;i<bytes.length;i++)bytes[i]=parseInt(hex.slice(i*2+2,i*2+4),16);return bytes;},
+                    deleteNode:function(name){return backupFile('delete',name);}
+                },pass);
+                finishBackup(captured);
+            }catch(e){openInfo('Backup still required',e.message||'Could not create encrypted backup.');}
+            finally{pass=null;recoveryBusy=false;}
         });
     }
-    function finishBackup(json) {
-        var body = document.createElement("div");
-        var p = document.createElement("div"); p.className = "modal__desc";
-        p.innerText = "Public pool recipes and optional proof snapshots. Verified to contain a usable recipe for every pool you own — but PandaPools cannot see the file your browser saves, so check the download arrived intact. " + ReserveRecovery.notice;
-        body.appendChild(p);
-        var ta = document.createElement("textarea");
-        ta.readOnly = true; ta.value = json;
-        ta.style.width = "100%"; ta.style.minHeight = "150px"; ta.style.fontFamily = "monospace"; ta.style.fontSize = "11px"; ta.style.marginTop = "6px";
-        body.appendChild(ta);
-        var dl = document.createElement("a");
-        dl.href = "data:application/json;charset=utf-8," + encodeURIComponent(json);
-        dl.download = "pandapools-backup.json";
-        dl.className = "btn btn--full"; dl.innerText = "⬇ Download backup file";
-        dl.style.display = "block"; dl.style.marginTop = "8px"; dl.style.textAlign = "center";
-        body.appendChild(dl);
-        var close = openModal("Your pool backup", body, function () { try { ta.focus(); ta.select(); } catch (e) {} }, [
-            { label: "Copy", cls: "btn btn--primary", fn: function () { try { ta.select(); document.execCommand("copy"); } catch (e) {} } },
-            { label: "Done", cls: "btn", fn: function () { close(); } }
-        ]);
+    function finishBackup(captured){
+        var body=document.createElement('div'),p=document.createElement('p');p.textContent='Download the encrypted pool + node backup, then select that saved file below to verify it. Another pool cannot be created until verification succeeds. Withdrawal remains available.';body.appendChild(p);
+        var url=URL.createObjectURL(new Blob([captured.encrypted],{type:'application/octet-stream'})),link=document.createElement('a');link.href=url;link.download='pandapools-full-'+Date.now()+'.ppbackup';link.className='btn btn--primary';link.textContent='Download encrypted backup';body.appendChild(link);
+        var input=document.createElement('input');input.type='file';input.accept='.ppbackup';body.appendChild(input);var result=document.createElement('p');body.appendChild(result);
+        input.onchange=async function(){
+            try{
+                var f=input.files[0];if(!f||f.size!==captured.encrypted.length)throw Error('The saved file has a different size.');
+                if(await PoolBackupBundle.sha(await f.arrayBuffer())!==await PoolBackupBundle.sha(captured.encrypted))throw Error('The saved file is damaged or is a different backup.');
+                var ok=await new Promise(function(resolve){Store.recordCombinedBackup(captured.json,resolve);});
+                if(!ok)throw Error('The pool list changed or verification could not be saved. Create another backup.');
+                result.textContent='Complete encrypted backup saved and verified. Keep it off this device. Later signing activity can make its node state stale.';renderMyLp();
+            }catch(e){result.textContent=e.message+' Backup is still required.';}
+        };
+        body.onModalClose=function(){URL.revokeObjectURL(url);captured.encrypted.fill(0);};
+        var close=openModal('Save and verify backup',body,null,[{label:'Done',cls:'btn',fn:function(){URL.revokeObjectURL(url);close();}}]);
     }
     /**
      * Export a per-pool statement: what you put in, your own trades against it, what is in the pool now, and
@@ -1714,15 +1735,29 @@ var App = (function () {
         var p = document.createElement("div"); p.className = "modal__desc";
         p.innerText = "Restore public pool recipes and verify reserves on this node. Expired proofs need a synced MegaMMR archive. Owner signing stays paused until you confirm current wallet signing state.";
         body.appendChild(p);
-        var fileIn = document.createElement("input"); fileIn.type = "file"; fileIn.accept = "application/json,.json"; fileIn.style.marginBottom = "8px"; fileIn.style.display = "block";
+        var fileIn = document.createElement("input"); fileIn.type = "file"; fileIn.accept = "application/json,.json,.ppbackup"; fileIn.style.marginBottom = "8px"; fileIn.style.display = "block";
         body.appendChild(fileIn);
         var ta = document.createElement("textarea"); ta.placeholder = "…or paste backup JSON here";
         ta.style.width = "100%"; ta.style.minHeight = "130px"; ta.style.fontFamily = "monospace"; ta.style.fontSize = "11px";
         body.appendChild(ta);
         var status = document.createElement("div"); status.className = "modal__note"; status.style.marginTop = "6px"; body.appendChild(status);
-        fileIn.onchange = function () {
-            var f = fileIn.files && fileIn.files[0]; if (!f) return;
-            var rd = new FileReader(); rd.onload = function () { ta.value = String(rd.result || ""); }; rd.readAsText(f);
+        fileIn.onchange = async function () {
+            var f=fileIn.files&&fileIn.files[0];if(!f)return;
+            if(f.size>PoolBackupBundle.MAX_FILE){status.textContent='BACKUP_TOO_LARGE';return;}
+            var bytes=new Uint8Array(await f.arrayBuffer());
+            if(bytes[0]!==77||bytes[1]!==86||bytes[2]!==76||bytes[3]!==84){if(f.size>4*1024*1024){status.textContent='Legacy JSON too large.';return;}ta.value=new TextDecoder().decode(bytes);return;}
+            backupPassword(false,async function(pass){
+                try{
+                    var opened=await PoolBackupBundle.open(pass,bytes);
+                    for(var p of opened.manifest.pools.pools)if(!ReserveRecovery.validRecipe(p))throw Error('Invalid pool recipe.');
+                    ta.value=opened.poolJson;status.textContent='Encrypted backup authenticated. Restore imports recipes and checks reserves; signing remains paused.';
+                    var link=document.createElement('a'),url=URL.createObjectURL(new Blob([opened.node],{type:'application/octet-stream'}));
+                    if(body.onModalClose)body.onModalClose();body.onModalClose=function(){URL.revokeObjectURL(url);opened.node.fill(0);opened.manifest.nodePassword='';link.onclick=null;link.remove();};
+                    link.href=url;link.download='pandapools-node-recovery-'+Date.now()+'.bak';link.className='btn';link.textContent='Extract native node backup';body.appendChild(link);
+                    link.onclick=function(){openInfo('Native node backup','Only restore this if the original wallet is unavailable. Use the node restore screen with the downloaded .bak and this password:\n\n'+opened.manifest.nodePassword+'\n\nFor an old backup, use the MegaMMR host eurobuddha.com:9001. Restore replaces wallet state. Afterward reopen the combined file here and restore the recipes.');};
+                }catch(e){status.textContent=e.message||'Wrong password or damaged backup. Nothing restored.';}
+                finally{pass=null;}
+            });
         };
         var close = openModal("Restore pools", body, null, [
             { label: "Cancel", cls: "btn btn--ghost", fn: function () { close(); } },

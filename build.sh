@@ -23,11 +23,11 @@ OUT="PandaPools_${VERSION}.mds.zip"
 # Step 1: dapp.conf MUST be the first entry.
 zip -q "${OUT}" dapp.conf
 # Step 2: everything else the dapp ships.
-zip -q "${OUT}" index.html style.css mds.js decimal.js covenant.js curve.js calc.js router.js book.js poolmgr.js store.js history.js statement.js sha3.js receipt-recovery.js activity-chain.js reserve-recovery.js favicon.png minima.svg
+zip -q "${OUT}" index.html style.css mds.js decimal.js covenant.js curve.js calc.js router.js book.js poolmgr.js input-claims.js store.js history.js statement.js sha3.js receipt-recovery.js activity-chain.js reserve-recovery.js combined-backup.js full-backup.js favicon.png minima.svg
 
 BUNDLE_DIR="$(mktemp -d)"
 trap 'rm -rf "${BUNDLE_DIR}"' EXIT
-cat decimal.js covenant.js curve.js reserve-recovery.js service.js > "${BUNDLE_DIR}/service.js"
+cat decimal.js covenant.js curve.js reserve-recovery.js input-claims.js service.js > "${BUNDLE_DIR}/service.js"
 zip -jq "${OUT}" "${BUNDLE_DIR}/service.js"
 
 echo "Archive contents (dapp.conf must be first):"

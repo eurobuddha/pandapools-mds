@@ -221,7 +221,7 @@ test('one card per pool, carrying BOTH identifiers and the retire action',async(
  const h=await harness();try{h.p.signingStateUnverified=true;await invoke(h.c.Store.ownRecord,h.p);
  const donor=process.env.PP_MDS_ROOT||path.resolve(__dirname,'..');
  const html=fs.readFileSync(path.join(donor,'index.html'),'utf8'),elements={};
- Object.assign(h.c,{POOLS:[],pendingCreate:null,mine:()=>true,withSnapshots:(_ps,cb)=>cb(),D:h.c.Decimal,
+ Object.assign(h.c,{doBackup:()=>{},POOLS:[],pendingCreate:null,mine:()=>true,withSnapshots:(_ps,cb)=>cb(),D:h.c.Decimal,
    MY_KEYS:{[opk.toLowerCase()]:true},el:id=>elements[id]||(elements[id]={})});
  const idsFn=html.slice(html.indexOf('    function ids(p) {'),html.indexOf('    function btn(label, onclick, primary)'));
  vm.runInContext(html.slice(html.indexOf('    function renderMyLp()'),html.indexOf('    function withSnapshots'))
@@ -238,6 +238,7 @@ test('one card per pool, carrying BOTH identifiers and the retire action',async(
  assert(card.includes('put it away'),'a closed pool must be dismissible without deleting its recipe');
  assert(card.includes('Confirm wallet signing state'),'the held state is still surfaced');
  assert.equal(elements.lpValue.innerText,'Reserves unavailable');
+ assert.equal(elements.backupRequired.hidden,false);assert.equal(elements.backupRequiredButton.onclick,h.c.doBackup);
  }finally{h.close();}
 });
 test('no cards at all until ownership is known',async()=>{
@@ -246,7 +247,7 @@ test('no cards at all until ownership is known',async()=>{
  const h=await harness();try{h.p.signingStateUnverified=true;await invoke(h.c.Store.ownRecord,h.p);
  const donor=process.env.PP_MDS_ROOT||path.resolve(__dirname,'..');
  const html=fs.readFileSync(path.join(donor,'index.html'),'utf8'),elements={};
- Object.assign(h.c,{POOLS:[],pendingCreate:null,mine:()=>false,withSnapshots:(_ps,cb)=>cb(),D:h.c.Decimal,
+ Object.assign(h.c,{doBackup:()=>{},POOLS:[],pendingCreate:null,mine:()=>false,withSnapshots:(_ps,cb)=>cb(),D:h.c.Decimal,
    MY_KEYS:{},el:id=>elements[id]||(elements[id]={})});
  const idsFn=html.slice(html.indexOf('    function ids(p) {'),html.indexOf('    function btn(label, onclick, primary)'));
  vm.runInContext(html.slice(html.indexOf('    function renderMyLp()'),html.indexOf('    function withSnapshots'))
@@ -290,5 +291,20 @@ test('block-mode support preserves legacy exhaustion and restored-key quarantine
   h.p.signingStateUnverified=true;await invoke(h.c.Store.ownRecord,h.p);
   h.set(q=>q==='keys'||q.startsWith('keys action:list')?good([{publickey:opk,uses:2342219,size:128,depth:4}]):base(q));
   assert.notEqual(await invoke(h.c.ReserveRecovery.checkSignature,[hash(1)],'auto'),null);
+ }finally{h.close();}
+});
+
+test('combined backup coverage remains required after cancel, new creation, or failed durable verification',async()=>{
+ const h=await harness();try{
+  assert.equal(await invoke(h.c.Store.combinedBackupReady),true);
+  assert(await invoke(h.c.Store.ownRecord,h.p));
+  assert.equal(await invoke(h.c.Store.combinedBackupReady),false);
+  const json=JSON.stringify({pandapools_backup:3,pools:[h.e]});
+  h.disk(false);assert.equal(await invoke(h.c.Store.recordCombinedBackup,json),false);
+  assert.equal(await invoke(h.c.Store.combinedBackupReady),false,'SQL memory alone cannot satisfy verified backup');
+  h.disk(true);assert.equal(await invoke(h.c.Store.recordCombinedBackup,json),true);
+  assert.equal(await invoke(h.c.Store.combinedBackupReady),true);
+  assert(await invoke(h.c.Store.ownRecord,{...h.p,address:hash(777)}));
+  assert.equal(await invoke(h.c.Store.combinedBackupReady),false);
  }finally{h.close();}
 });
