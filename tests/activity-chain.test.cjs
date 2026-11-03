@@ -119,6 +119,7 @@ function coin(address, amount, tid = '0x00') { return { address, amount, tokenam
    const elements={};c.document={hidden:false,getElementById:id=>elements[id]||(elements[id]={innerHTML:'',classList:{toggle(){}}}),querySelectorAll:()=>[]};
    c.MDS.init=()=>{};c.History.isRunning=()=>true;
    const scripts=Array.from(fs.readFileSync(path.join(base,'index.html'),'utf8').matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)).map(m=>m[1]).join('\n');
+   vm.runInContext(fs.readFileSync(path.join(base,'runtime-guard.js'),'utf8'),c,{filename:'runtime-guard.js'});
    vm.runInContext(scripts,c,{filename:'index-inline.js'});
    c.App.setScope(false);await new Promise(r=>setTimeout(r,30));
    assert(elements.actList.innerHTML.includes('Show more'));

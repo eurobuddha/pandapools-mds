@@ -8,7 +8,10 @@
     <script>try{var t=localStorage.getItem("pp_theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
 </head>
 <body>
-<div class="shell">
+<div id="runtimeGate" class="runtime-gate" role="alert">
+  <div class="runtime-gate__card"><h1>PandaPools setup required</h1><p id="runtimeReason">Checking WRITE permission and block-as-key-uses mode…</p><p id="uptimeNotice"></p><label id="uptimeConsent" hidden><input id="uptimeAccepted" type="checkbox"> I understand the hosting and backup requirements.</label><button id="runtimeRetry" class="btn btn--primary">Check and continue</button></div>
+</div>
+<div class="shell" id="poolShell" hidden inert>
     <header class="hdr">
         <div class="hdr__logo">
             <span class="hdr__mark">◈</span>
@@ -120,6 +123,7 @@
 
 <script src="decimal.js"></script>
 <script src="mds.js"></script>
+<script src="runtime-guard.js"></script>
 <script src="covenant.js"></script>
 <script src="curve.js"></script>
 <script src="calc.js"></script>
@@ -134,10 +138,11 @@
 <script src="input-claims.js"></script>
 <script src="poolmgr.js"></script>
 <script src="reserve-recovery.js"></script>
+<script src="rescue-flow.js"></script>
 <script src="combined-backup.js"></script>
 <script src="full-backup.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.34";
+var PANDAPOOLS_VERSION = "0.6.36";
 
 var App = (function () {
     var D = Decimal;
@@ -172,10 +177,37 @@ var App = (function () {
     // pending create guard
     var pendingCreate = null, pendingBlock = 0, pendingLabel = "";
 
+    var runtimeReady = false, appStarted = false;
+    PoolRuntimeGuard.install();
+    PoolRuntimeGuard.onBlocked(function (error) { lockRuntime(error); });
+    function lockRuntime(error) {
+        runtimeReady = false;
+        el("runtimeGate").hidden = false; el("poolShell").hidden = true; el("poolShell").setAttribute("inert", "");
+        el("runtimeReason").textContent = error;
+    }
+    function runtimeCheck() {
+        PoolRuntimeGuard.check(function (error) {
+            if (error) { lockRuntime(error); return; }
+            var acknowledged = false;
+            try { acknowledged = localStorage.getItem("pp_host_notice_v1") === "accepted"; } catch (e) {}
+            if (!acknowledged) {
+                el("uptimeConsent").hidden = false;
+                if (!el("uptimeAccepted").checked) { lockRuntime("WRITE permission and block mode verified. Read and accept the hosting requirements to continue."); return; }
+                try { localStorage.setItem("pp_host_notice_v1", "accepted"); acknowledged = localStorage.getItem("pp_host_notice_v1") === "accepted"; } catch (e) {}
+                if (!acknowledged) { lockRuntime("Could not save your acknowledgment. Enable local storage, then retry."); return; }
+            }
+            runtimeReady = true; el("runtimeGate").hidden = true; el("poolShell").hidden = false; el("poolShell").removeAttribute("inert");
+            if (!appStarted) { appStarted = true; initApp(); }
+        });
+    }
+    el("uptimeNotice").textContent = PoolRuntimeGuard.notice;
+    el("runtimeRetry").onclick = runtimeCheck;
     // ---------------------------------------------------------------- lifecycle
     MDS.init(function (msg) {
-        if (msg.event === "inited") initApp();
+        if (msg.event === "inited") { runtimeCheck(); return; }
+        if (!runtimeReady) return;
         if (msg.event === "NEWBLOCK") {
+            PoolRuntimeGuard.check(function(error) { if(error) lockRuntime(error); });
             CURRENT_BLOCK = parseInt(msg.data && msg.data.txpow && msg.data.txpow.header && msg.data.txpow.header.block) || CURRENT_BLOCK;
             el("blockHeight").innerText = "#" + CURRENT_BLOCK;
             PoolMgr.onNewBlock();     // resume any pending signature
@@ -1752,24 +1784,48 @@ var App = (function () {
                     for(var p of opened.manifest.pools.pools)if(!ReserveRecovery.validRecipe(p))throw Error('Invalid pool recipe.');
                     ta.value=opened.poolJson;status.textContent='Encrypted backup authenticated. Restore imports recipes and checks reserves; signing remains paused.';
                     var link=document.createElement('a'),url=URL.createObjectURL(new Blob([opened.node],{type:'application/octet-stream'}));
-                    if(body.onModalClose)body.onModalClose();body.onModalClose=function(){URL.revokeObjectURL(url);opened.node.fill(0);opened.manifest.nodePassword='';link.onclick=null;link.remove();};
+                    if(body.backupCleanup)body.backupCleanup();body.backupCleanup=function(){URL.revokeObjectURL(url);opened.node.fill(0);opened.manifest.nodePassword='';link.onclick=null;link.remove();};
                     link.href=url;link.download='pandapools-node-recovery-'+Date.now()+'.bak';link.className='btn';link.textContent='Extract native node backup';body.appendChild(link);
                     link.onclick=function(){openInfo('Native node backup','Only restore this if the original wallet is unavailable. Use the node restore screen with the downloaded .bak and this password:\n\n'+opened.manifest.nodePassword+'\n\nFor an old backup, use the MegaMMR host eurobuddha.com:9001. Restore replaces wallet state. Afterward reopen the combined file here and restore the recipes.');};
                 }catch(e){status.textContent=e.message||'Wrong password or damaged backup. Nothing restored.';}
                 finally{pass=null;}
             });
         };
-        var close = openModal("Restore pools", body, null, [
+        var consent=document.createElement('label'),agree=document.createElement('input');agree.type='checkbox';consent.appendChild(agree);
+        consent.appendChild(document.createTextNode(" This is the original wallet with its current signing state preserved; every other copy has stopped signing. I authorize recovery, withdrawal and collection. A seed-only restore or old wallet backup is not sufficient."));
+        consent.style.display='block';body.appendChild(consent);
+        var rescueTimer=null,closed=false,rescueStarted=false,rescueJson="",restoreReport="",previousClose=body.onModalClose;
+        body.onModalClose=function(){closed=true;if(rescueTimer)clearTimeout(rescueTimer);if(previousClose)previousClose();if(body.backupCleanup)body.backupCleanup();};
+        function continueRescue(){
+            if(closed)return;
+            PoolRescue.run(rescueJson,agree.checked,function(m){status.textContent=m;},function(report){
+                status.textContent=report+(restoreReport?"\n\nReserve check and next steps:\n"+restoreReport:"");
+                if(!closed&&/waiting|Keep this recovery screen open/i.test(report))rescueTimer=setTimeout(continueRescue,20000);
+            });
+        }
+        var close = openModal("Rescue pools", body, null, [
             { label: "Cancel", cls: "btn btn--ghost", fn: function () { close(); } },
-            { label: "Restore", cls: "btn btn--primary", fn: function () { doRestore(ta.value, status); } }
+            { label: "Check reserves only", cls: "btn", fn: function () { if(!rescueStarted)doRestore(ta.value, status); } },
+            { label: "Recover & withdraw", cls: "btn btn--primary", fn: function () {
+                if(!agree.checked){status.textContent="Confirm the wallet condition above first. If only a seed or old wallet backup is available, stop and restore the latest complete signing state.";return;}
+                if(recoveryBusy||rescueStarted)return;
+                rescueStarted=true;rescueJson=ta.value;ta.readOnly=true;fileIn.disabled=true;agree.disabled=true;
+                if(rescueTimer)clearTimeout(rescueTimer);
+                PoolRescue.prepare(rescueJson,function(needed,error){
+                    if(error){status.textContent=error;return;}
+                    if(!needed){restoreReport="Resuming recorded recovery. Existing transactions are checked; no withdrawal is repeated.";continueRescue();return;}
+                    doRestore(needed,status,function(){restoreReport=status.textContent;continueRescue();});
+                });
+            } }
         ]);
     }
-    function doRestore(json,statusEl){
+    function doRestore(json,statusEl,after){
         if(recoveryBusy)return;recoveryBusy=true;statusEl.innerText="Verifying pool recovery…";
         ReserveRecovery.configuredArchive(function(archive){
             ReserveRecovery.restore(json,archive,function(detail){statusEl.innerText=detail;},function(r){
                 recoveryBusy=false;statusEl.innerText="Verified reserves for "+r.restored+" of "+r.total+" pools.\n"+(r.details||[]).join("\n\n")+"\n"+(r.warn||"");
-                rescan(true);renderMyLp();
+                if(r.restored<r.total)statusEl.textContent+="\n\nNext steps:\n1. Let the node catch up and retry.\n2. Update the node if proof-only recovery is unsupported.\n3. If proofs still fail, save a fresh encrypted combined backup and keep your existing wallet. In MinimaCore choose MegaMMR resync, host eurobuddha.com:9001, preserving the existing wallet (no new phrase). This interrupts every app on the node. The recipes have been registered above where reported successful. After resync completes, reopen this backup and retry. If the owner key/signing state is missing, restore the newest complete matching wallet backup first; a resync alone cannot repair that.";
+                rescan(true);renderMyLp();if(after)after();
             });
         });
     }
@@ -1817,15 +1873,10 @@ var App = (function () {
         ]);
     }
     function archiveConnection(){
-        Store.kvGet("recovery_archive",function(url){
-            var body=document.createElement("div"),desc=document.createElement("div"),input=document.createElement("input");
-            desc.className="modal__desc";desc.innerText="Optional public HTTPS MegaMMR RPC endpoint that allows browser requests (CORS) for current reserve proofs. Your node validates every proof. Leave empty to use local MegaMMR or backup proofs.";
-            input.type="url";input.value=url;input.placeholder="https://archive.example.com";input.style.width="100%";body.appendChild(desc);body.appendChild(input);
-            var close=openModal("Recovery archive",body,null,[{label:"Cancel",cls:"btn",fn:function(){close();}},{label:"Save",cls:"btn btn--primary",fn:function(){ReserveRecovery.saveArchive(input.value,function(ok){if(ok){close();toast("Recovery archive saved.");}else desc.innerText="Could not save. Use a public HTTPS hostname without credentials, query or fragment.";});}}]);
-        });
+        openInfo("Recovery archive", "eurobuddha.com:9001\n\nPandaPools automatically asks this archive for missing reserve proofs through your node. Your node checks every proof before import. No seed or signing state is sent. If your node lacks this feature, update it before retrying recovery.\n\nIf valid proofs still cannot be imported after the node has caught up, use the guided resync instructions in the recovery report. Recovery never resets the node automatically.");
     }
     function showRecoveryGuide(){
-        openInfo("How pool recovery works",ReserveRecovery.notice+"\n\nThe saved covenant recipe identifies your pool even when a light node no longer sees its coins. Restore verifies local reserves, then backup proofs, then current proofs from a synced MegaMMR archive. Missing reserves remain visible and are never reported as recovered.\n\nRestore does not regenerate keys or estimate past signature use. Confirm signing only with current complete wallet state and no other signing copies. Keep-fresh requires this app and node to remain running; it cannot guarantee availability while offline.");
+        openInfo("How pool recovery works",PoolRuntimeGuard.notice+"\n\n"+ReserveRecovery.notice+"\n\nThe saved covenant recipe identifies your pool even when a light node no longer sees its coins. Restore verifies local reserves, then backup proofs, then current proofs from a synced MegaMMR archive. Missing reserves remain visible and are never reported as recovered.\n\nRestore does not regenerate keys or estimate past signature use. Confirm signing only with current complete wallet state and no other signing copies. Keep-fresh requires this app and node to remain running; it cannot guarantee availability while offline.");
     }
 
     return {
