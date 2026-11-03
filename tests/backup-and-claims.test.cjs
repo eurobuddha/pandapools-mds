@@ -38,6 +38,14 @@ test('posted inputs stay held across a new context and durable database reload',
  h.badSql();assert.equal(await call(c.load,[id(6)]),false);
  }finally{h.close();}
 });
+test('release frees only the named handle and survives a restart',async()=>{
+ const h=await sqlHarness();try{let c=h.load();const call=(fn,...args)=>new Promise(r=>fn(...args,r));
+ assert.equal(await call(c.post,[id(1)],'kept'),true);assert.equal(await call(c.post,[id(2)],'refused'),true);
+ assert.equal(await call(c.release,[id(1),id(2)],'refused'),true);
+ assert.equal(await call(c.load,[id(2)]),true,'refused post is free');assert.equal(await call(c.load,[id(1)]),false,'other handle stays held');
+ c=await h.restart();assert.equal(await call(c.load,[id(2)]),true);assert.equal(await call(c.load,[id(1)]),false);
+ }finally{h.close();}
+});
 test('pending reserve exclusion checks exact IDs and readable unspent replies',async()=>{
  const h=await sqlHarness();try{const c=h.load();let reply={status:true,response:[{coinid:id(8),spent:false}]};const check=()=>new Promise(r=>c.check([id(8)],(q,cb)=>{assert.equal(q,'coins checkmempool:true coinid:'+id(8));cb(reply);},r));
  assert.equal(await check(),true);for(const r of [{status:true,response:[]},{status:true,response:[{coinid:id(9),spent:false}]},{status:true,pending:true,response:[{coinid:id(8),spent:false}]}]){reply=r;assert.equal(await check(),false);}

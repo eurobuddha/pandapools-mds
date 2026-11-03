@@ -1,3 +1,7 @@
+## 0.6.37
+
+- A pool transaction the node refused (`txnpost` answered `status:false`, nothing broadcast) no longer keeps its input coins excluded forever. `PoolInputClaims.release` frees the claims of that one transaction handle only; unanswered, pending and uncertain posts stay held. Same shared module as PandaDEX MiniDapp 0.4.22; native parity PandaPools Android 0.9.76.
+
 ## 0.6.32
 
 - Complete block-mode capacity checks at the actual signing boundary and recovery confirmation. Preserve legacy exhaustion, counter floors and quarantine.
