@@ -1,3 +1,7 @@
+## 0.6.38
+
+- Release of 0.6.37: the page header now shows the same version as `dapp.conf` (0.6.37's label still read 0.6.36, so its zip was never built).
+
 ## 0.6.37
 
 - A pool transaction the node refused (`txnpost` answered `status:false`, nothing broadcast) no longer keeps its input coins excluded forever. `PoolInputClaims.release` frees the claims of that one transaction handle only; unanswered, pending and uncertain posts stay held. Same shared module as PandaDEX MiniDapp 0.4.22; native parity PandaPools Android 0.9.76.
