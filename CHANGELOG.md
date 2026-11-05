@@ -1,3 +1,7 @@
+## 0.6.39
+
+- RULE 1: identifiers are shown whole. `PP.shorten` (txpowids in status lines and activity, pool addresses, token ids) cut to 8…6, `PP.tokenLabel` and the service's label fallback named an unnamed token by its first 8 hex + …, and the Pools card cut the pool address to 18 characters. All now return the whole value; card titles wrap. New `tests/rule1-ids.test.cjs`.
+
 ## 0.6.38
 
 - Release of 0.6.37: the page header now shows the same version as `dapp.conf` (0.6.37's label still read 0.6.36, so its zip was never built).

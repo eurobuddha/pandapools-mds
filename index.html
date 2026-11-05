@@ -142,7 +142,7 @@
 <script src="combined-backup.js"></script>
 <script src="full-backup.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.38";
+var PANDAPOOLS_VERSION = "0.6.39";
 
 var App = (function () {
     var D = Decimal;
@@ -580,7 +580,7 @@ var App = (function () {
                 kvRow("reserves", trim(p.reserveM) + " MINIMA · " + trim(p.reserveT) + " " + esc(tl)) +
                 kvRow("spot price", trim8(Curve.spotPrice(p)) + " " + esc(tl) + " / MINIMA") +
                 kvRow("fees accrued (K/KMIN−1)", trim8(fg) + " %") +
-                kvRow("pool", esc(p.address.substring(0, 18)) + "…") + '</div>';
+                kvRow("pool", p.address) + '</div>';
         });
         host.innerHTML = html;
     }

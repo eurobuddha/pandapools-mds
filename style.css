@@ -95,7 +95,7 @@ body {
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 10px; }
 .card--accent { border-left: 3px solid var(--accent); }
 .card--amber { border-color: var(--amber); }
-.card__title { font-size: 15px; font-weight: 700; color: var(--heading); margin-bottom: 6px; }
+.card__title { font-size: 15px; font-weight: 700; color: var(--heading); margin-bottom: 6px; overflow-wrap: anywhere; }   /* RULE 1: a whole token id wraps */
 .tok-wrap { position: relative; display: inline-block; vertical-align: middle; margin-right: 9px; }
 .tok-icon { display: block; width: 28px; height: 28px; border-radius: 6px; object-fit: cover; background: var(--surface2); }
 .tok-icon--native { background: #fff; object-fit: contain; padding: 3px; }   /* official black-on-white Minima mark on its white tile */
