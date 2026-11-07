@@ -51,6 +51,7 @@ var ReserveRecovery = (function () {
     function entry(p) {
         var e = {addr:p.address,mx:p.mxaddress||"",opk:p.opk,oadr:p.oadr,tok:p.tok,dec:p.tokDecimals==null?8:p.tokDecimals,kmin:String(p.kmin),script:p.covenantScript||p.script||Covenant.script(p.opk,p.oadr,p.tok,p.kmin)};
         if (integer(p.minimumOwnerUses,MAX_TREE_USES)) e.opkuses=Number(p.minimumOwnerUses);
+        if (p.retired===true) e.retired=true;   // review 7 Nov (R2-4): lets the owner-key check tell closed pools apart
         return e;
     }
     function coinFor(p,c) {

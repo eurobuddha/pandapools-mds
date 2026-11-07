@@ -64,3 +64,10 @@ test('review 7 Nov R2-3: a claim whose post never happened is swept after 10 min
  assert.equal(await call(c.load,[id(3)]),false,'in-mempool (absent) input stays held');assert.equal(await call(c.load,[id(4)]),false,'spent input stays held');
  }finally{h.close();}
 });
+test('review 7 Nov R2-4: a retired pool whose owner key is on another wallet no longer blocks the backup; live pools still must match',()=>{
+ const withRetired=(extra)=>({pandapools_backup:3,pools:[{opk:id(2),opkuses:5},{opk:id(9),opkuses:3,...extra}]});
+ assert.equal(F.identity(keys,withRetired({retired:true})).wallet,id(1),'closed pool of another wallet is skipped');
+ assert.throws(()=>F.identity(keys,withRetired({})),/OWNER_KEYS_MISSING/,'a live pool still needs its key here');
+ const regressed=JSON.parse(JSON.stringify(keys));regressed.response.keys[1].uses=4;
+ assert.throws(()=>F.identity(regressed,{pandapools_backup:3,pools:[{opk:id(2),opkuses:5,retired:true}]}),/OWNER_KEYS_MISSING/,'a retired pool whose key IS here keeps every check');
+});

@@ -340,3 +340,6 @@ test('review 7 Nov D-1: my own post moves the saved reserve hints, so a dust-cro
  assert.equal((await invoke(h.c.Store.ownAll))[0].coinidM,hash(11));
  }finally{h.close();}
 });
+test('review 7 Nov R2-4: exported recipes carry retired only for closed pools',async()=>{
+ const h=await harness();try{assert.equal(h.c.ReserveRecovery.entry({...h.p,retired:true}).retired,true);assert.equal('retired' in h.c.ReserveRecovery.entry({...h.p,retired:false}),false);assert.equal(h.c.ReserveRecovery.validRecipe(h.c.ReserveRecovery.entry({...h.p,retired:true})),true);}finally{h.close();}
+});
