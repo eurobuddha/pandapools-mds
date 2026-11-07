@@ -156,6 +156,9 @@ MDS.init(function (msg) {
             ensureTables(function () { READY = true; MDS.log("PandaPools service ready"); retrackOwn(); cleanForeign(); scan(); });
         });
     }
+    // review 7 Nov (R2-3, native 0.9.84/0.9.87; same sweep as pandadex-mds 0.4.23): free posted-input claims whose
+    // post provably never happened (two-phase: held >= 10 min, the coin unspent and NOT in the mempool). Read-only on the node.
+    if (msg.event === "NEWBLOCK" && typeof PoolInputClaims !== "undefined") PoolInputClaims.sweepUnposted(function (q, cb) { MDS.cmd(q, cb); }, Date.now());
     if (msg.event === "NEWBLOCK") { PoolRuntimeGuard.check(function(error) { if(error) { READY=false; MDS.log("PandaPools paused: "+error); return; } if(READY) scan(); else ensureTables(function(){ READY=true; retrackOwn(); cleanForeign(); scan(); }); }); }
 });
 

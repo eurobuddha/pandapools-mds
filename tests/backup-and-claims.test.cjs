@@ -51,3 +51,16 @@ test('pending reserve exclusion checks exact IDs and readable unspent replies',a
  assert.equal(await check(),true);for(const r of [{status:true,response:[]},{status:true,response:[{coinid:id(9),spent:false}]},{status:true,pending:true,response:[{coinid:id(8),spent:false}]}]){reply=r;assert.equal(await check(),false);}
  }finally{h.close();}
 });
+test('review 7 Nov R2-3: a claim whose post never happened is swept after 10 minutes; spent or in-mempool claims stay held',async()=>{
+ const h=await sqlHarness();try{let c=h.load();const call=(fn,...args)=>new Promise(r=>fn(...args,r));
+ assert.equal(await call(c.post,[id(2),id(3),id(4)],'lost_post'),true);
+ const asked=[];const node=(q,cb)=>{asked.push(q);cb(q.endsWith(id(2))?{status:true,response:[{coinid:id(2),spent:false}]}:q.endsWith(id(4))?{status:true,response:[{coinid:id(4),spent:true}]}:{status:true,response:[]});};
+ assert.equal(await call(c.sweepUnposted,node,1000),0,'first sweep only notes the claims');assert.equal(asked.length,0);
+ assert.equal(await call(c.sweepUnposted,node,1000+5*60000),0,'nothing released before 10 minutes');
+ assert.equal(await call(c.sweepUnposted,node,1000+11*60000),1,'only the unspent, not-in-mempool claim is released');
+ assert(asked.every(q=>q.startsWith('coins checkmempool:true coinid:')),'read-only node queries');
+ assert.equal(await call(c.load,[id(2)]),true,'never-posted input usable again');
+ c=await h.restart();assert.equal(await call(c.load,[id(2)]),true,'release is durable');
+ assert.equal(await call(c.load,[id(3)]),false,'in-mempool (absent) input stays held');assert.equal(await call(c.load,[id(4)]),false,'spent input stays held');
+ }finally{h.close();}
+});

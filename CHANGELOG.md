@@ -1,3 +1,9 @@
+## 0.6.41
+
+- SECURITY (review 7 Nov, R2-3; mirror of native 0.9.84 and 0.9.87): an uncertain post no longer holds its inputs forever. `pp_posted_inputs` had no release path for a post whose reply never came (lost HTTP reply, page closed mid-post), so a quiet pool could never be refreshed, closed or migrated from the app again. `PoolInputClaims.sweepUnposted` runs on every NEWBLOCK in the background service: a claim seen held for at least 10 minutes whose coin the node still reports unspent and NOT in the mempool was provably never posted and is released; spent, in-mempool or unreadable claims stay held. The function is copied unchanged from pandadex-mds 0.4.23 (same shared module); native gates the release on the user confirming its interrupted-write pause, which this MiniDapp does not have, so it uses the same two-phase timed sweep as PandaDEX. An open page keeps its own in-memory hold until it is reopened.
+- Native 0.9.87 (also cover a host's resting-order claims in the shared store) is covered by construction: the sweep reads the whole `pp_posted_inputs` table, and MiniDapp SQL is per-dapp, so there is no other host's store to load.
+- New test in `tests/backup-and-claims.test.cjs`.
+
 ## 0.6.40
 
 - SECURITY (review 7 Nov, D-1; mirror of native 0.9.83): my own posts move the saved reserve hints. A refresh, deposit, migrate or create recreates a pool's reserves; the txnpost reply's outputs carry the new coin ids, and `ReserveRecovery.rememberPosted` now records them in `pp_ownpools.lastcoinm/lastcoint` (page `PoolMgr.finalize` and the service's keep-fresh `checkPostSvc`). Before, the hints still named the spent coins after the owner's next keep-fresh, so dust coins at the pool address (more than the 512-coin bounded read) made the reserves unfindable. Hints remain an accelerator: every read still checks the coins it gets.
