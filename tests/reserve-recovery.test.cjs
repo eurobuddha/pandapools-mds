@@ -326,3 +326,17 @@ test('bounded recovery signing checks the actual owner and input address while n
   h.p.minimumOwnerUses=900;assert.match(await check([hash(1)],opk,{pool:h.p,stage:'close'}),/reuse/);
  }finally{h.close();}
 });
+test('review 7 Nov D-1: my own post moves the saved reserve hints, so a dust-crowded address still finds the new reserves',async()=>{
+ const h=await harness();try{Object.assign(h.p,{coinidM:hash(1),coinidT:hash(2),reserveM:new h.c.Decimal(10),reserveT:new h.c.Decimal(10)});assert(await invoke(h.c.Store.ownRecord,h.p));
+ const out=(n,a,t)=>({coinid:hash(n),address:a,tokenid:t,amount:'10'});
+ const reply={status:true,response:{txpowid:hash(50),body:{txn:{outputs:[out(11,addr.toUpperCase().replace('0X','0x'),'0x00'),out(12,addr,tok),out(13,hash(999),'0x00')]}}}};
+ assert.equal(h.c.ReserveRecovery.postedReserves({status:true,response:{body:{txn:{outputs:[out(11,addr,'0x00')]}}}},[{address:addr,tok}]).length,0,'one leg alone is not a pool');
+ assert.equal(h.c.ReserveRecovery.postedReserves(reply,[{address:hash(777),tok}]).length,0,'another address is never touched');
+ assert.equal(await invoke(h.c.ReserveRecovery.rememberPosted,reply),true);
+ const ps=await invoke(h.c.Store.ownAll);assert.equal(ps[0].coinidM,hash(11));assert.equal(ps[0].coinidT,hash(12));
+ const base=standard(h,[coin(11),coin(12,tok)]);h.set(q=>q.startsWith('balance')?good([{coins:999}]):base(q));
+ const p={...h.p,coinidM:'',coinidT:''};assert(await invoke(h.c.ReserveRecovery.readReserves,p));assert.equal(p.coinidM,hash(11));assert.equal(p.coinidT,hash(12));
+ assert.equal(await invoke(h.c.ReserveRecovery.rememberPosted,{status:true,response:{txpow:{body:{txn:{outputs:[out(21,hash(555),'0x00'),out(22,hash(555),tok)]}}}}}),true,'no saved recipe at that address: nothing written');
+ assert.equal((await invoke(h.c.Store.ownAll))[0].coinidM,hash(11));
+ }finally{h.close();}
+});

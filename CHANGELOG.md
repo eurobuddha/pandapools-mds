@@ -1,3 +1,9 @@
+## 0.6.40
+
+- SECURITY (review 7 Nov, D-1; mirror of native 0.9.83): my own posts move the saved reserve hints. A refresh, deposit, migrate or create recreates a pool's reserves; the txnpost reply's outputs carry the new coin ids, and `ReserveRecovery.rememberPosted` now records them in `pp_ownpools.lastcoinm/lastcoint` (page `PoolMgr.finalize` and the service's keep-fresh `checkPostSvc`). Before, the hints still named the spent coins after the owner's next keep-fresh, so dust coins at the pool address (more than the 512-coin bounded read) made the reserves unfindable. Hints remain an accelerator: every read still checks the coins it gets.
+- Native 0.9.83's other half (R2-2: an old recovery record routed every later collection into a refusing path) does not apply here: `PoolMgr.forwardOwnerFunds` never consults the rescue journal; only `PoolRescue.resume` passes `recovery`, and the background collect sweep and "Collect to wallet" never do.
+- New test in `tests/reserve-recovery.test.cjs`.
+
 ## 0.6.39
 
 - RULE 1: identifiers are shown whole. `PP.shorten` (txpowids in status lines and activity, pool addresses, token ids) cut to 8…6, `PP.tokenLabel` and the service's label fallback named an unnamed token by its first 8 hex + …, and the Pools card cut the pool address to 18 characters. All now return the whole value; card titles wrap. New `tests/rule1-ids.test.cjs`.

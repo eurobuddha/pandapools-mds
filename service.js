@@ -591,6 +591,8 @@ function checkPostSvc(txid, cmds, cb) {
                             MDS.cmd("txnpost id:"+txid,function(rp){var ok=!!(rp&&rp.status===true&&!rp.pending);
                                 /* Refused by the node (status:false, not pending): nothing was broadcast, so free the inputs. */
                                 if(rp&&rp.status===false&&!rp.pending){PoolInputClaims.release(ids,txid,function(){finishSignSvc(cb,false,owner,heartbeat);});return;}
+                                // review 7 Nov (D-1, native 0.9.83): keep-fresh recreated the reserves — the saved hints follow them
+                                if(ok){ReserveRecovery.rememberPosted(rp,function(){finishSignSvc(cb,true,owner,heartbeat);});return;}
                                 finishSignSvc(cb,ok,owner,heartbeat);});
                         });
                 });
