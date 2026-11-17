@@ -142,7 +142,7 @@
 <script src="combined-backup.js"></script>
 <script src="full-backup.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.42";
+var PANDAPOOLS_VERSION = "0.6.43";
 
 var App = (function () {
     var D = Decimal;
@@ -598,6 +598,8 @@ var App = (function () {
             var gone=recipes.filter(function(p){return p.retired;});
             var active=recipes.filter(function(p){return !p.retired;});
             var unresolved=keysKnown?active.filter(function(p){return !seen[p.address.toLowerCase()];}):[];
+            if(typeof autoRecover==="function")autoRecover(unresolved);          // 0.6.43: an aged-out own pool recovers itself (re-track → verify/import → keep-fresh)
+            if(keysKnown&&typeof autoConfirm==="function")autoConfirm(active); // 0.6.43: a restored block-mode owner key is confirmed from the chain tip, no button
             if(pendingCreate&&seen[pendingCreate.address.toLowerCase()]){setStatus("lpStatus","Pool live ✓","ok");pendingCreate=null;}
             Store.collectAll(function(collect){
             withSnapshots(live,function(){
@@ -1856,6 +1858,33 @@ var App = (function () {
         });
     }
 
+    // ---- 0.6.43: the daily pool upkeep is automatic ----
+    var AUTO_RECOVERED={},AUTO_CONFIRMED={};
+    /** A saved pool whose reserves this node cannot see recovers itself — once per session per pool and silently:
+     *  re-track the covenant, verify and import both reserve coins (local node, then the archive); the keep-fresh
+     *  pass then recreates them young. Only pools whose owner key is on this node. The status line says what happened. */
+    function autoRecover(unresolved){
+        if(recoveryBusy||!CURRENT_BLOCK)return;
+        var p=null;
+        for(var i=0;i<unresolved.length;i++){var u=unresolved[i];if(!mine(u)||!u.address||u.retired)continue;var a=u.address.toLowerCase();if(AUTO_RECOVERED[a])continue;AUTO_RECOVERED[a]=true;p=u;break;}
+        if(!p)return;
+        var status={innerText:"",textContent:""};
+        Object.defineProperty(status,"innerText",{set:function(v){setStatus("lpStatus","Recovering pool reserves… "+String(v).split("\n")[0],"");},get:function(){return "";}});
+        doRestore(JSON.stringify({pandapools_backup:3,pools:[ReserveRecovery.entry(p)]}),status,function(){
+            setStatus("lpStatus","Pool "+p.address+": reserve check finished.","");
+        });
+    }
+    /** A restored block-mode owner key (128^4 tree) is confirmed automatically — it signs leaf max(tip, uses+1), so
+     *  once the tip has passed the recorded floor no leaf can repeat (ReserveRecovery.counterSafe). Legacy keys keep
+     *  the button. Once per key per session. */
+    function autoConfirm(active){
+        if(!CURRENT_BLOCK)return;
+        active.forEach(function(p){
+            if(!p.opk||!mine(p)||!(p.signingStateUnverified||Store.confirmationFailed(p.opk)))return;
+            var k=p.opk.toLowerCase();if(AUTO_CONFIRMED[k])return;AUTO_CONFIRMED[k]=true;
+            ReserveRecovery.confirmKey(p.opk,function(ok){if(ok){setStatus("lpStatus","Owner key confirmed from the chain tip. Owner actions are enabled.","ok");renderMyLp();}},CURRENT_BLOCK,true);
+        });
+    }
     function recoverSaved(address){
         Store.ownAll(function(ps){var p=ps.filter(function(r){return r.address.toLowerCase()===address.toLowerCase();})[0];
             if(!p)return;var body=document.createElement("div"),status=document.createElement("div");status.style.whiteSpace="pre-wrap";body.appendChild(status);

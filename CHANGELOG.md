@@ -1,3 +1,9 @@
+## 0.6.43
+
+- Pool upkeep is automatic (mirror of native Dexicon 0.2.95 / 0.3.61, PandaPools 0.10.19). A saved pool whose reserves this node cannot see recovers itself — once per session per pool, silently: re-track the covenant, verify and import both reserve coins (local node, then the archive), then keep-fresh recreates them young so every light node sees the pool again (`autoRecover` in `index.html`). The "Check for reserves" button stays for a manual re-run.
+- A restored block-mode owner key (128^4 tree, `-blockaskeyuses`) is confirmed from the chain tip, no button: it signs leaf max(tip, uses+1), so once the tip has passed the recorded floor no leaf can repeat (`ReserveRecovery.counterSafe`; `confirmKey(opk, cb, chainBlock, blockModeOnly)`). Legacy 64^3 keys keep the owner's attestation. A confirmation never lowers the recorded floor (`Store.ownAcknowledge`).
+- New test in `tests/reserve-recovery.test.cjs`.
+
 ## 0.6.42
 
 - SECURITY (review 7 Nov, R2-4; mirror of native 0.9.86): a pool closed on another wallet no longer blocks every backup. The verified combined backup (`FullBackup.identity`) required EVERY saved recipe's owner key on this node, retired ones included, so after closing a pool on one wallet and moving to another no backup could ever be verified again, and creates/migrates that need a fresh backup were refused. Exported recipes now carry `retired` (`ReserveRecovery.entry`); a retired recipe whose owner key this wallet does not hold is skipped (its recipe still travels in the bundle). Live pools, and retired pools whose key IS here, keep every check.

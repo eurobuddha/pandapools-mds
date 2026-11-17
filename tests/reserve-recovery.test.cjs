@@ -288,6 +288,23 @@ test('block-mode keys reach the real signing boundary and recovery confirmation'
   assert.equal(await invoke(h.c.ReserveRecovery.checkSignature,[hash(1)],opk),null);
  }finally{h.close();}
 });
+test('0.6.43: a restored block-mode key confirms from the chain tip; a legacy key never does',async()=>{
+ const h=await harness();try{
+  const base=standard(h,[coin(1),coin(2,tok)]);
+  h.set(q=>q==='keys'||q.startsWith('keys action:list')?good([{publickey:opk,uses:0,size:128,depth:4,modifier:'0x40'}]):base(q));
+  h.p.signingStateUnverified=true;await invoke(h.c.Store.ownRecord,h.p);   // recorded floor 590, node counter 0 (plain seed restore)
+  assert.equal(await invoke(h.c.ReserveRecovery.confirmKey,opk),false,'no tip given: the legacy counter rule holds');
+  assert.equal(await new Promise(r=>h.c.ReserveRecovery.confirmKey(opk,r,500,true)),false,'tip still below the floor');
+  assert.equal(await new Promise(r=>h.c.ReserveRecovery.confirmKey(opk,r,2424349,true)),true,'tip past the floor: leaf = max(tip, uses+1) cannot repeat');
+  const ps=await invoke(h.c.Store.ownAll);assert.equal(ps[0].signingStateUnverified,false);assert.equal(ps[0].minimumOwnerUses,590,'the floor is never lowered');
+  h.set(q=>q==='keys'||q.startsWith('keys action:list')?good([{publickey:opk,uses:0,size:64,depth:3}]):base(q));
+  h.p.signingStateUnverified=true;await invoke(h.c.Store.ownRecord,h.p);
+  assert.equal(await new Promise(r=>h.c.ReserveRecovery.confirmKey(opk,r,2424349,true)),false,'a legacy key is never confirmed automatically');
+  assert.equal(h.c.ReserveRecovery.counterSafe(0,590,262144,2424349),false);
+  assert.equal(h.c.ReserveRecovery.counterSafe(590,590,262144,0),true);
+  assert.equal(h.c.ReserveRecovery.counterSafe(268435456,0,268435456,2424349),false,'exhausted');
+ }finally{h.close();}
+});
 test('block-mode support preserves legacy exhaustion and restored-key quarantine',async()=>{
  const h=await harness();try{
   const base=standard(h,[coin(1)]);
