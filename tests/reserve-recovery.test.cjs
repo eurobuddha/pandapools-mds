@@ -305,6 +305,22 @@ test('0.6.43: a restored block-mode key confirms from the chain tip; a legacy ke
   assert.equal(h.c.ReserveRecovery.counterSafe(268435456,0,268435456,2424349),false,'exhausted');
  }finally{h.close();}
 });
+test('0.6.44: re-checking a recipe this node holds keeps its signing state; a recipe new to the node starts held',async()=>{
+ const h=await harness();try{
+  h.set(standard(h,[coin(1),coin(2,tok)]));
+  h.p.signingStateUnverified=false;assert.equal(await invoke(h.c.Store.ownRecord,h.p),true);
+  let r=await restore(h);assert.equal(r.restored,1);
+  let ps=await invoke(h.c.Store.ownAll);assert.equal(ps[0].signingStateUnverified,false,'the confirmed key stays confirmed after a reserve re-check');
+  h.p.signingStateUnverified=true;assert.equal(await invoke(h.c.Store.ownRecord,h.p),true);
+  r=await restore(h);assert.equal(r.restored,1);
+  ps=await invoke(h.c.Store.ownAll);assert.equal(ps[0].signingStateUnverified,true,'a held key stays held');
+ }finally{h.close();}
+ const h2=await harness();try{
+  h2.set(standard(h2,[coin(1),coin(2,tok)]));
+  const r=await restore(h2);assert.equal(r.restored,1);
+  const ps=await invoke(h2.c.Store.ownAll);assert.equal(ps[0].signingStateUnverified,true,'a recipe new to this node starts held');
+ }finally{h2.close();}
+});
 test('block-mode support preserves legacy exhaustion and restored-key quarantine',async()=>{
  const h=await harness();try{
   const base=standard(h,[coin(1)]);

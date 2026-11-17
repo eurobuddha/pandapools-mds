@@ -1,3 +1,7 @@
+## 0.6.44
+
+- Review of 0.6.43: re-checking the reserves of a recipe this node already holds (the card's button or the automatic pass) no longer pauses owner signing for it — a reserve check is not a wallet restore. A recipe new to this node still starts held. The manual "Confirm wallet signing state" now knows the chain tip too, so it works for a restored block-mode key. New test in `tests/reserve-recovery.test.cjs`.
+
 ## 0.6.43
 
 - Pool upkeep is automatic (mirror of native Dexicon 0.2.95 / 0.3.61, PandaPools 0.10.19). A saved pool whose reserves this node cannot see recovers itself — once per session per pool, silently: re-track the covenant, verify and import both reserve coins (local node, then the archive), then keep-fresh recreates them young so every light node sees the pool again (`autoRecover` in `index.html`). The "Check for reserves" button stays for a manual re-run.

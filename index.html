@@ -142,7 +142,7 @@
 <script src="combined-backup.js"></script>
 <script src="full-backup.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.43";
+var PANDAPOOLS_VERSION = "0.6.44";
 
 var App = (function () {
     var D = Decimal;
@@ -1868,11 +1868,11 @@ var App = (function () {
         var p=null;
         for(var i=0;i<unresolved.length;i++){var u=unresolved[i];if(!mine(u)||!u.address||u.retired)continue;var a=u.address.toLowerCase();if(AUTO_RECOVERED[a])continue;AUTO_RECOVERED[a]=true;p=u;break;}
         if(!p)return;
-        var status={innerText:"",textContent:""};
-        Object.defineProperty(status,"innerText",{set:function(v){setStatus("lpStatus","Recovering pool reserves… "+String(v).split("\n")[0],"");},get:function(){return "";}});
-        doRestore(JSON.stringify({pandapools_backup:3,pools:[ReserveRecovery.entry(p)]}),status,function(){
-            setStatus("lpStatus","Pool "+p.address+": reserve check finished.","");
-        });
+        // doRestore writes its progress into an element; route those lines to the My LP status line instead of a modal
+        var status={};
+        Object.defineProperty(status,"innerText",{set:function(v){setStatus("lpStatus","Pool "+p.address+" — "+String(v).split("\n")[0],"");},get:function(){return "";}});
+        Object.defineProperty(status,"textContent",{set:function(){},get:function(){return "";}});
+        doRestore(JSON.stringify({pandapools_backup:3,pools:[ReserveRecovery.entry(p)]}),status);
     }
     /** A restored block-mode owner key (128^4 tree) is confirmed automatically — it signs leaf max(tip, uses+1), so
      *  once the tip has passed the recorded floor no leaf can repeat (ReserveRecovery.counterSafe). Legacy keys keep
@@ -1898,7 +1898,7 @@ var App = (function () {
         body.style.overflowWrap="anywhere";
         var close=openModal("Confirm current wallet signing state",body,null,[
             {label:"Cancel",cls:"btn",fn:function(){close();}},
-            {label:"I confirm current wallet state",cls:"btn btn--primary",fn:function(){ReserveRecovery.confirmKey(opk,function(ok){close();openInfo("Wallet signing state",ok?"Confirmation saved. Owner signing enabled.":"Could not confirm current signing state. Signing remains paused.");renderMyLp();});}}
+            {label:"I confirm current wallet state",cls:"btn btn--primary",fn:function(){ReserveRecovery.confirmKey(opk,function(ok){close();openInfo("Wallet signing state",ok?"Confirmation saved. Owner signing enabled.":"Could not confirm current signing state. Signing remains paused.");renderMyLp();},CURRENT_BLOCK);}}
         ]);
     }
     function archiveConnection(){
