@@ -31,7 +31,9 @@ function standard(h,cs=[]){return q=>{
  if(q.startsWith('coins coinid:'))return good(cs.filter(c=>q.includes(c.coinid)));
  if(q==='status')return good({megammr:false});
  if(q==='keys'||q.startsWith('keys action:list'))return good([{publickey:opk,uses:846,modifier:'0x40'}]);
- if(q.startsWith('scripts address:'))return good({address:q.split(':')[1],simple:true,publickey:opk});
+ // Like the real node: script rows are looked up case-SENSITIVELY, in the form the coin rows carry (upper-case on a
+ // real node); anything else is the node's own "Script with that address not found".
+ if(q.startsWith('scripts address:')){const a=q.slice('scripts address:'.length);return cs.some(c=>c.address===a)?good({address:a,simple:true,publickey:opk}):{status:false,error:'Script with that address not found'};}
  return {status:false};};}
 async function restore(h,archive=null){return invoke(h.c.ReserveRecovery.restore,JSON.stringify({pandapools_backup:3,pools:[h.e]}),archive,null);}
 test('current live reserves beat expired proofs; restore quarantines even a higher current counter',async()=>{
@@ -375,4 +377,13 @@ test('review 7 Nov D-1: my own post moves the saved reserve hints, so a dust-cro
 });
 test('review 7 Nov R2-4: exported recipes carry retired only for closed pools',async()=>{
  const h=await harness();try{assert.equal(h.c.ReserveRecovery.entry({...h.p,retired:true}).retired,true);assert.equal('retired' in h.c.ReserveRecovery.entry({...h.p,retired:false}),false);assert.equal(h.c.ReserveRecovery.validRecipe(h.c.ReserveRecovery.entry({...h.p,retired:true})),true);}finally{h.close();}
+});
+test('0.6.45: the signing check asks the node for the script in the case the coin carries (real nodes are upper-case and case-sensitive)',async()=>{
+ const h=await harness();try{
+  const upper='0x'+hash(0xabcdef).slice(2).toUpperCase();
+  h.set(standard(h,[{...coin(1),address:upper},{...coin(2,tok),address:upper}]));
+  assert.equal(await invoke(h.c.ReserveRecovery.checkSignature,[hash(1),hash(2)],'auto'),null);
+  const asked=h.trace.filter(q=>q.startsWith('scripts address:'));
+  assert.deepEqual(asked,['scripts address:'+upper],'one lookup per distinct address, exactly as the coin row gave it');
+ }finally{h.close();}
 });

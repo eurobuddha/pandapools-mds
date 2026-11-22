@@ -1,3 +1,8 @@
+## 0.6.45
+
+- A pool swap was refused on every real node with "the node could not say which key signs one of the coins it would spend … Script with that address not found". The signing check (`ReserveRecovery.checkSignature`, since 0.6.23) recorded each input's address lower-cased and asked the node `scripts address:<lower-case>`; the node looks script rows up case-sensitively (stored upper-case), so it never found one. It now asks with the address exactly as the coin row carries it and still compares the reply ignoring case (as native `OwnerKeyRecovery` does). Reviewed every other lower-cased identifier that reaches a node command (coin ids in `coins coinid:` / `coinexport coinid:` / `txninput coinid:`, key lists, `keys action:list publickey:`): those commands parse hex into bytes and are case-insensitive; `txnsign publickey:` and `scripts address:` in `poolmgr.js` are case-sensitive but only ever receive the node's own form.
+- The tests' stand-in node now answers `scripts address:` case-sensitively, in the form the coin rows carry, like the real node. New test in `tests/reserve-recovery.test.cjs` (fails on 0.6.44).
+
 ## 0.6.44
 
 - Review of 0.6.43: re-checking the reserves of a recipe this node already holds (the card's button or the automatic pass) no longer pauses owner signing for it — a reserve check is not a wallet restore. A recipe new to this node still starts held. The manual "Confirm wallet signing state" now knows the chain tip too, so it works for a restored block-mode key. New test in `tests/reserve-recovery.test.cjs`.
