@@ -43,14 +43,18 @@ test('headless service scan (the packaged bundle): poisoned beacons skipped, not
   const n = node(), c = context(n, ['runtime-guard.js', 'decimal.js', 'covenant.js', 'curve.js', 'reserve-recovery.js', 'input-claims.js', 'service.js'], { PoolMgr: null });   // the MDS bundle has no poolmgr.js (service.js done() tests PoolMgr)
   c.scan(); check(n);
 });
-test('the choke point: any command holding ";", CR, LF or NUL is refused, logged and never sent', () => {
+test('the choke point: any command holding ";" or a control character (tab included) is refused, logged and never sent', () => {
   const n = node(), c = context(n, ['runtime-guard.js']); const logs = [], blocked = [];
   c.MDS.log = m => logs.push(m); c.PoolRuntimeGuard.install(); c.PoolRuntimeGuard.onBlocked(e => blocked.push(e));
-  for (const q of ['runscript script:"RETURN TRUE;' + SEND + '"', 'coins address:0x01\n' + SEND, 'balance\r', 'scripts\u0000x', 'txnpost id:a;txndelete id:a']) {
+  // 0.6.47: a TAB starts a new parameter in the node's splitter (a state value "<hex>\taddress:<stranger>" adds one)
+  const bad = ['runscript script:"RETURN TRUE;' + SEND + '"', 'coins address:0x01\n' + SEND, 'balance\r', 'scripts\u0000x', 'txnpost id:a;txndelete id:a',
+    'txnstate id:a port:3 value:' + hex(2) + '\taddress:' + ATTACKER, 'coins address:0x01\u001f', 'scripts\u007f', 'checkmode\u000b'];
+  for (const q of bad) {
     let r; c.MDS.cmd(q, v => { r = v; });
-    assert.equal(r.status, false); assert.match(r.error, /UNSAFE_COMMAND/);
+    assert.equal(r.status, false, JSON.stringify(q)); assert.match(r.error, /UNSAFE_COMMAND/);
   }
-  assert.deepEqual(n.ran, []); assert.equal(logs.length, 5); assert(logs.every(l => l.startsWith('SECURITY'))); assert.equal(blocked.length, 5);
+  assert.deepEqual(n.ran, []); assert.equal(logs.length, bad.length); assert(logs.every(l => l.startsWith('SECURITY'))); assert.equal(blocked.length, bad.length);
+  assert.equal(c.PoolRuntimeGuard.unsafe('coins address:' + hex(1) + ' tokenid:0x00'), false);
   let ok; c.MDS.cmd('scripts', v => { ok = v; }); assert.equal(ok.status, true);
 });
 test('pool parameters: strict 32-byte hex and a plain positive decimal', () => {

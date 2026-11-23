@@ -1,3 +1,7 @@
+## 0.6.47
+
+- SECURITY (review of 0.6.46): the command wrapper's refusal is one pattern, `[;\x00-\x1f\x7f]` — ";" and every control character, TAB included. The node's parameter splitter breaks on any white space, so a tab inside a value (a stranger's state port "<hex>\taddress:<theirs>") added a parameter of the stranger's choosing; 0.6.46 refused only ";", CR, LF and NUL. `readOnly` uses the same check. New cases in `tests/command-injection.test.cjs` (fail on 0.6.46).
+
 ## 0.6.46
 
 - SECURITY: a stranger's coin at the public PANDAPOOLS sentinel could make this node run commands of the stranger's choosing. The node splits EVERY command text on ";" (even inside quotes) and runs each piece; discovery (`book.js` and the headless `service.js`) read state ports 2-5 of any sentinel coin unchecked and pasted them into the covenant sent by `runscript` (and the re-announce's `txnstate`), so a port holding `;send …` ran a `send` with this MiniDapp's rights. Now:
