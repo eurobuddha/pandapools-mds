@@ -1,3 +1,10 @@
+## 0.6.54
+
+- The claims sweep releases a claim (never posted) only after TWO CONSECUTIVE "unspent + not in mempool" reads at least one block apart (plus the 10-minute floor): the miner drops a coin from its mining list a moment before the txn reaches the mempool, and a node restart empties the local mempool, so one read could free an input of a transaction that was in fact broadcast. An absent or unreadable read breaks the streak. The pass reads the chain tip itself (`block`).
+- Claim rows were never deleted and every one was re-queried every block: a row whose coin has been absent (spent, or gone from the tree) for 30 consecutive sweeps or over 24 h is now dropped (logged, never reported as "not posted"; `PoolInputClaims.check` still refuses a coin the node does not answer). A re-entrancy guard (`SWEEPING`) stops a slow pass overlapping the next block's.
+- `ActivityChain.settleUnknown` marks a post "not posted" only when its inputs are no longer claimed AND one of them still reads unspent; a dropped claim (coin spent) leaves it unknown until the transaction shows in history.
+- New `tests/claims-sweep.test.cjs` and a dropped-claim case in `tests/unknown-outcome.test.cjs` (fail on 0.6.53); the sweep cases in `backup-and-claims` / `uncertain-post` now answer `block` like the node.
+
 ## 0.6.53
 
 - A post the node did not answer ("posted, outcome unknown") is recorded in Activity as **Outcome unknown** with every input coin id it claimed, in full (new `pp_activity.inputs` column, added on upgrade) — no longer as Failed with no id, which could never show that it went through and invited a retry that double-trades. `PoolMgr`'s finalize hands the page `{unknown, txid, inputs}` with the failure (through the sign gate and the close retry wrapper); every kind records through `Store.actRecordFail` (swap, create, add, migrate, close). A refusal is still a plain failure.

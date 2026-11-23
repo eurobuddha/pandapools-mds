@@ -266,9 +266,17 @@ var ActivityChain = (function () {
     /** Settle every 'unknown' post (a txnpost the node did not answer) from the chain. POSTED: a stored transaction
      *  (wallet history or public pool history) spends ALL of the inputs it claimed — the row becomes an ordinary 'ok'
      *  receipt carrying that transaction id, so confirmations follow as usual. NOT POSTED: none of its inputs is
-     *  claimed any more (PoolInputClaims.sweepUnposted released them: unspent and out of the mempool). Otherwise it
+     *  claimed any more AND one still reads unspent and out of the mempool (the sweep released it). Otherwise it
      *  stays unknown. Posted is checked first. cb(types) = {SWAP:true, ...} of the posts still unknown, or null when
      *  the activity table could not be read (callers must then keep the actions off). */
+    function anyUnspent(ids, j, cb) {
+        if (j >= ids.length) { cb(false); return; }
+        command("coins checkmempool:true coinid:" + ids[j], function (c) {
+            var coin = c && c.status === true && !c.pending && Array.isArray(c.response) && c.response.length === 1 ? c.response[0] : null;
+            if (coin && key(coin.coinid) === key(ids[j]) && coin.spent === false) { cb(true); return; }
+            anyUnspent(ids, j + 1, cb);
+        });
+    }
     function settleUnknown(cb) {
         Store.actUnknown(function (rows) {
             if (!rows) { cb(null); return; }
@@ -288,8 +296,14 @@ var ActivityChain = (function () {
                     var hit = txs.filter(function (h) { return hex(h.txpowid) && spends(h, ids); })[0];
                     if (hit) { Store.actSettle(r.id, "ok", key(hit.txpowid), function (ok) { if (!ok) left[r.type] = true; next(i + 1); }); return; }
                     PoolInputClaims.heldIds(ids, function (held) {
-                        if (held && !held.length) { Store.actSettle(r.id, "notposted", "", function (ok) { if (!ok) left[r.type] = true; next(i + 1); }); return; }
-                        left[r.type] = true; next(i + 1);
+                        if (!held || held.length) { left[r.type] = true; next(i + 1); return; }
+                        // no longer claimed — the sweep RELEASED it (an input read unspent twice: never posted) or DROPPED it
+                        // (spent / gone from the tree: most likely posted, history will show it). Only an input that still
+                        // reads unspent proves the transaction never went through.
+                        anyUnspent(ids, 0, function (yes) {
+                            if (!yes) { left[r.type] = true; next(i + 1); return; }
+                            Store.actSettle(r.id, "notposted", "", function (ok) { if (!ok) left[r.type] = true; next(i + 1); });
+                        });
                     });
                 })(0);
             });

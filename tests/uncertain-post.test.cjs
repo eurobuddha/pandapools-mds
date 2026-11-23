@@ -14,8 +14,9 @@ const TIMEOUT = { status: false, pending: true, error: 'the node did not answer 
 const invoke = (fn, ...args) => new Promise(r => fn(...args, r));
 
 function node(postReply) {
-  let spent = false;   // the funding coin, as the chain sees it
+  let spent = false, tip = 100;   // the funding coin, as the chain sees it; the chain tip moves one block per read
   const n = standin((p, v) => {
+    if (p === 'block') return { status: true, response: { block: String(tip++) } };
     if (p === 'checkmode') return { status: true, response: { writemode: true, dblocked: false } };
     if (p.startsWith('keys action:genkey')) return { status: true, response: { publickey: BLOCK } };
     if (p === 'keys') return { status: true, response: [{ publickey: PK, uses: 10 }] };
@@ -101,7 +102,8 @@ test('a claim the service settles is free in the page too (separate contexts, on
     const page = load(), service = load(), id = FUND.toLowerCase();
     assert.equal(await invoke(page.post, [id], 'ppann_1'), true);
     assert.equal(await invoke(page.load, [id]), false, 'held in the page');
-    const unspent = (q, cb) => cb({ status: true, response: [{ coinid: FUND, spent: false }] }), t = Date.now();
+    let tip = 100;
+    const unspent = (q, cb) => cb(q === 'block' ? { status: true, response: { block: String(tip++) } } : { status: true, response: [{ coinid: FUND, spent: false }] }), t = Date.now();
     await invoke(service.sweepUnposted, unspent, t);
     assert.equal(await invoke(service.sweepUnposted, unspent, t + 11 * 60000), 1, 'the service sweep released it');
     assert.equal(await invoke(page.load, [id]), true, 'the page reads the table, not a stale memory hold');

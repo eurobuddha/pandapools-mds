@@ -14,8 +14,9 @@ const TIMEOUT = { status: false, pending: true, error: 'the node did not answer 
 const invoke = (fn, ...args) => new Promise(r => fn(...args, r));
 
 function node(postReply) {
-  let spent = false;
+  let spent = false, tip = 100;
   const n = standin((p, v) => {
+    if (p === 'block') return { status: true, response: { block: String(tip++) } };
     if (p === 'checkmode') return { status: true, response: { writemode: true, dblocked: false } };
     if (p.startsWith('keys action:genkey')) return { status: true, response: { publickey: BLOCK } };
     if (p === 'keys') return { status: true, response: [{ publickey: PK, uses: 10 }] };
@@ -88,6 +89,20 @@ test('an unknown post whose inputs the sweep frees settles NOT POSTED; a refusal
     await invoke(h.c.Store.actRecordFail, 'DEPOSIT', 'add', 'post rejected : Invalid TxPoW', undefined);
     assert.equal((await row(h.c)).failed, true); assert.equal((await row(h.c)).outcome, '');
     assert.deepEqual({ ...await invoke(h.c.ActivityChain.settleUnknown) }, {}, 'a refusal holds nothing back');
+  } finally { h.close(); }
+});
+test('0.6.54: a claim the sweep DROPS (its coin spent / gone, history not in yet) never settles the post as NOT POSTED', async () => {
+  const n = node(TIMEOUT), h = await context(n, PAGE);
+  try {
+    await invoke(h.c.Store.init); await invoke(h.c.ActivityChain.init);
+    const r = await unknownPost(h.c);
+    await invoke(h.c.Store.actRecordFail, 'SWAP', 'swap', r.fail, r.info);
+    n.spend();   // the post went through: the funding coin is gone from `coins`
+    const cmd = (q, cb) => h.c.MDS.cmd(q, cb), t = Date.now();
+    for (let i = 0; i < 31; i++) await invoke(h.c.PoolInputClaims.sweepUnposted, cmd, t + i * 60000);
+    assert.deepEqual(Array.from(await invoke(h.c.PoolInputClaims.heldIds, [FUND])), [], 'the claim was dropped');
+    assert.deepEqual({ ...await invoke(h.c.ActivityChain.settleUnknown) }, { SWAP: true }, 'still unknown, not "not posted"');
+    assert.equal((await row(h.c)).outcome, 'unknown');
   } finally { h.close(); }
 });
 test('every operation kind is held back while its own unknown post is unsettled', async () => {

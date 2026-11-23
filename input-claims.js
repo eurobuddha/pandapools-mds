@@ -55,34 +55,62 @@ var PoolInputClaims = (function(){
         });
     }
     /* Review 7 Nov (C-1): an uncertain post held its inputs FOREVER (no release path), so a BOOK/POOL take that never
-     * mined kept the user's funding coins, order coins and pool reserves unusable in the app. Two-phase sweep, run from a
-     * service tick: a claim first SEEN at least SWEEP_MS ago whose coin the node still reports UNSPENT and NOT in the
-     * mempool was provably never posted — it is released. Spent, in-mempool or unreadable claims stay held. */
-    var SWEEP_MS=10*60000,firstSeen={};
+     * mined kept the user's funding coins, order coins and pool reserves unusable in the app. The sweep (a service tick,
+     * one block = one pass) settles every claim row from chain reads (`coins checkmempool:true coinid:` answers a coin
+     * only while it is unspent, in the tree and out of the mempool / mining list):
+     *   RELEASED  (never posted): first seen >= SWEEP_MS ago AND two CONSECUTIVE reads at least one block apart both
+     *             answered it unspent and out of the mempool. One read is not enough: the miner drops a coin from its
+     *             mining list a moment before the txn reaches the mempool, and a node restart empties the local mempool.
+     *   DROPPED   (spent, or gone from the tree): absent on ABSENT_SWEEPS consecutive passes, or for over 24 h. The
+     *             claim protects nothing any more (PoolInputClaims.check refuses a coin the node does not answer), and
+     *             a row kept forever is re-queried every block.
+     *   KEPT      otherwise: in the mempool, unreadable, or not yet proven either way.
+     * One pass at a time (SWEEPING): a slow pass overlapping the next block's would double-count reads. Counters are
+     * in memory, so a restart only makes the sweep start counting again (slower, never looser). */
+    var SWEEP_MS=10*60000,ABSENT_SWEEPS=30,ABSENT_MS=24*3600000,firstSeen={},unspentAt={},absent={},SWEEPING=false;
     function sweepUnposted(cmd,nowMs,cb){
         cb=cb||function(){};nowMs=nowMs||Date.now();
-        table(function(ok){if(!ok){cb(0);return;}
-            MDS.sql('SELECT coinid,handle FROM pp_posted_inputs',function(r){
-                if(!r||r.status!==true||!Array.isArray(r.rows)){cb(0);return;}
-                var rows=r.rows,at=0,freed=0,live={};
-                function next(){
-                    if(at>=rows.length){for(var k in firstSeen)if(!live[k])delete firstSeen[k];cb(freed);return;}
-                    var id=String(rows[at].COINID||rows[at].coinid||'').toLowerCase(),handle=String(rows[at].HANDLE||rows[at].handle||'');at++;
-                    if(!valid(id)){next();return;}
-                    live[id]=true;
-                    if(!firstSeen[id]){firstSeen[id]=nowMs;next();return;}
-                    if(nowMs-firstSeen[id]<SWEEP_MS){next();return;}
-                    cmd('coins checkmempool:true coinid:'+id,function(c){
-                        var rs=c&&c.status===true&&!c.pending&&c.response,coin=Array.isArray(rs)&&rs.length===1?rs[0]:null;
-                        if(!coin||String(coin.coinid).toLowerCase()!==id||coin.spent!==false){next();return;}
+        if(SWEEPING){cb(0);return;}
+        SWEEPING=true;
+        function done(n){SWEEPING=false;cb(n);}
+        cmd('block',function(b){
+            var tip=b&&b.status===true&&!b.pending&&b.response?parseInt(b.response.block,10):NaN;
+            table(function(ok){if(!ok){done(0);return;}
+                MDS.sql('SELECT coinid,handle FROM pp_posted_inputs',function(r){
+                    if(!r||r.status!==true||!Array.isArray(r.rows)){done(0);return;}
+                    var rows=r.rows,at=0,freed=0,live={};
+                    function forget(id){delete firstSeen[id];delete unspentAt[id];delete absent[id];}
+                    function drop(id,handle,why,counts){
                         MDS.sql("DELETE FROM pp_posted_inputs WHERE coinid='"+id+"'",function(d){
-                            if(d&&d.status===true){delete held[id];delete owner[id];delete firstSeen[id];freed++;
-                                try{MDS.log('PandaPools '+handle+': not posted — claimed input '+id+' is unspent and out of the mempool, released');}catch(e){}}
+                            if(d&&d.status===true){delete held[id];delete owner[id];forget(id);if(counts)freed++;
+                                try{MDS.log('PandaPools '+handle+': '+why);}catch(e){}}
                             next();
                         });
-                    });
-                }
-                next();
+                    }
+                    function next(){
+                        if(at>=rows.length){for(var k in firstSeen)if(!live[k])forget(k);done(freed);return;}
+                        var id=String(rows[at].COINID||rows[at].coinid||'').toLowerCase(),handle=String(rows[at].HANDLE||rows[at].handle||'');at++;
+                        if(!valid(id)){next();return;}
+                        live[id]=true;
+                        if(!firstSeen[id])firstSeen[id]=nowMs;
+                        cmd('coins checkmempool:true coinid:'+id,function(c){
+                            if(!c||c.status!==true||c.pending||!Array.isArray(c.response)){delete unspentAt[id];next();return;}   // unreadable: proves nothing, breaks the streak
+                            var coin=c.response.length===1?c.response[0]:null;
+                            if(!c.response.length){
+                                delete unspentAt[id];
+                                var a=absent[id]||(absent[id]={n:0,since:nowMs});a.n++;
+                                if(a.n>=ABSENT_SWEEPS||nowMs-a.since>ABSENT_MS){drop(id,handle,'claimed input '+id+' spent or gone from the chain tree for '+a.n+' sweeps, claim dropped',false);return;}
+                                next();return;
+                            }
+                            delete absent[id];
+                            if(!coin||String(coin.coinid).toLowerCase()!==id||coin.spent!==false||!isFinite(tip)){delete unspentAt[id];next();return;}
+                            if(unspentAt[id]===undefined||tip<=unspentAt[id]){if(unspentAt[id]===undefined)unspentAt[id]=tip;next();return;}
+                            if(nowMs-firstSeen[id]<SWEEP_MS){next();return;}
+                            drop(id,handle,'not posted — claimed input '+id+' read unspent and out of the mempool at blocks '+unspentAt[id]+' and '+tip+', released',true);
+                        });
+                    }
+                    next();
+                });
             });
         });
     }
