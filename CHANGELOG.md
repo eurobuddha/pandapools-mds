@@ -1,3 +1,8 @@
+## 0.6.52
+
+- A covenant script is no longer "escaped" into `runscript`/`newscript script:"…"`. The node's parameter reader (CommandRunner.splitStringJSON / splitterQuotedPattern) honours no backslash escape: a quoted value ends at the FIRST `"` and keeps the backslash, so an escaped `"` still closed the value, the text after it became parameters of its own (the last duplicate `script:` wins) and the script arrived mangled. `Covenant.scriptArg` and the service's `scriptArg` now REFUSE (null) any script holding `"`, `\`, `;` or a control character; every call site goes through `scriptCmd`, which sends nothing, logs a SECURITY line and answers the caller like a node refusal (book scan, address derivation, every newscript, the service's re-track / foreign demotion / scan / refresh), and the reserve restore refuses before any command. No legitimate covenant holds either character (its literals are poolParams-strict hex/decimal).
+- New `tests/script-quote.test.cjs`: 300 covenants built from valid pool parameters pass the check and the node reads each back whole; hostile scripts are refused in both builders and nothing reaches the node. `tests/node-standin.cjs` gains `params()`, the node's own quoted-value reader (ends at the first `"`). Fails on 0.6.51.
+
 ## 0.6.51
 
 - RULE 1 (review): the service's token-label fallback went through a helper named `short()`. Since 0.6.39 it already returned the whole id, but a helper of that name is one edit away from cutting identifiers again; it is gone and the fallback is the full token id itself. New case in `tests/rule1-ids.test.cjs` (fails on 0.6.50, which still had the helper).

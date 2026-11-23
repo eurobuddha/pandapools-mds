@@ -12,4 +12,19 @@ function standin(reply) {
     cmd(q, cb) { texts.push(q); const out = pieces(q).map(p => { ran.push(p); return reply(p, verb(p)); }); if (cb) cb(out[0] || { status: false }); }
   };
 }
-module.exports = { pieces, verb, standin };
+// The node's own parameter reader for one piece (CommandRunner.splitStringJSON, the path taken without { or [):
+// white space outside quotes ends a token; a `"` only toggles quoting and is dropped — there is NO backslash escape, so
+// a quoted value ends at the FIRST `"` and keeps any backslash; then name:value at the first ':', LAST duplicate wins.
+function params(piece) {
+  const toks = []; let cur = '', quoted = false;
+  for (const ch of String(piece).trim()) {
+    if (ch === ' ' && !quoted) { if (cur) toks.push(cur.trim()); cur = ''; }
+    else if (ch === '"') quoted = !quoted;
+    else cur += ch;
+  }
+  if (cur) toks.push(cur.trim());
+  const out = { verb: (toks.shift() || '').toLowerCase(), p: {} };
+  for (const t of toks) { const i = t.indexOf(':'); if (i > 0) out.p[t.slice(0, i).trim()] = t.slice(i + 1).trim(); }
+  return out;
+}
+module.exports = { pieces, verb, standin, params };

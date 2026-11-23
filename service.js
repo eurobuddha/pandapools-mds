@@ -74,11 +74,23 @@ function covScript(opk, oadr, tok, kmin) {
     return TEMPLATE.split("$OPK").join(opk).split("$OADR").join(oadr).split("$TOK").join(tok).split("$KMIN").join(kmin);
 }
 // Quote a KISS script WITHOUT escaping forward slashes (JSONObject.quote's `/`→`\/` makes *5/1000 unparseable
-// → coins permanently unspendable). Escape only `"` and `\`; leave `/` alone.
+// → coins permanently unspendable). A script holding `"`, `\`, `;` or a control character is REFUSED, never escaped:
+// the node's parameter parser honours no backslash escape (a quoted value ends at the FIRST `"`), so an escaped quote
+// still closes the value and the rest becomes parameters of its own (same rule as covenant.js Covenant.scriptArg).
+var UNSAFE_SCRIPT = /["\\;\x00-\x1f\x7f]/;
 function scriptArg(s) {
-    var out = '"';
-    for (var i = 0; i < s.length; i++) { var c = s.charAt(i); if (c === '"' || c === '\\') out += '\\'; out += c; }
-    return out + '"';
+    if (typeof s !== 'string' || !s || UNSAFE_SCRIPT.test(s)) return null;
+    return '"' + s + '"';
+}
+function scriptCmd(head, s, cb) {
+    var q = scriptArg(s);
+    if (q === null) {
+        var why = 'UNSAFE_SCRIPT: refused a covenant script holding a double quote, a backslash, ";" or a control character. Nothing was sent.';
+        try { MDS.log('SECURITY ' + why + ' ' + JSON.stringify(String(s))); } catch (e) {}
+        if (cb) cb({ status: false, pending: false, error: why });
+        return;
+    }
+    MDS.cmd(head + ' script:' + q, cb);
 }
 function truthy(v) {
     if (v === true) return true;
@@ -219,7 +231,7 @@ function retrackOwn() {
                 if (!addr || tracked[addr]) return;   // already track:true → no redundant write
                 var script = (row.SCRIPT && row.SCRIPT.length) ? row.SCRIPT
                            : (row.OPK && row.OADR && row.TOK && row.KMIN ? covScript(row.OPK, row.OADR, row.TOK, row.KMIN) : "");
-                if (script) MDS.cmd("newscript trackall:true script:" + scriptArg(script), function () {});
+                if (script) scriptCmd("newscript trackall:true", script, function () {});
             });
         });
     });
@@ -297,7 +309,7 @@ function demoteForeign(foreign,i){
     var row=foreign[i];if(!row.track){demoteForeign(foreign,i+1);return;}
     stillForeign(row,function(ok){
         if(!ok){demoteForeign(foreign,i+1);return;}
-        MDS.cmd("newscript trackall:false script:"+scriptArg(row.script),function(){demoteForeign(foreign,i+1);});
+        scriptCmd("newscript trackall:false",row.script,function(){demoteForeign(foreign,i+1);});
     });
 }
 function untrackForeignCoins(foreign){untrackNextAddress(foreign,0);}
@@ -386,7 +398,7 @@ function derive(params) {
     list.forEach(function (p) {
         var tracked = p.script || null;
         var script = tracked || covScript(p.opk, p.oadr, p.tok, p.kmin);
-        MDS.cmd("runscript script:" + scriptArg(script), function (jr) {
+        scriptCmd("runscript", script, function (jr) {
             try {
                 var resp = jr ? jr.response : null;
                 if (resp && truthy(resp.parseok) && resp.script) {
@@ -766,7 +778,7 @@ function refreshSvc(p) {
     var a = p.address.toLowerCase();
     function giveUp(txid) { if (txid) MDS.cmd("txndelete id:" + txid, function () {}); delete REFRESH_SVC[a]; }   // allow a retry next sweep
     // register the covenant (idempotent) so txnbasics can attach its script, then fund the beacon dust + build
-    MDS.cmd("newscript trackall:true script:" + scriptArg(covScript(p.opk, p.oadr, p.tok, p.kmin)), function () {
+    scriptCmd("newscript trackall:true", covScript(p.opk, p.oadr, p.tok, p.kmin), function () {
         var excl = {}; excl[a] = true; if (p.oadr) excl[p.oadr.toLowerCase()] = true;
         bestMinimaCoinSvc(excl, ANNOUNCE_DUST, false, function (best) {
             if (!best || decCmp(best.amount || "0", ANNOUNCE_DUST) < 0) { giveUp(null); return; }   // no spare MINIMA → retry later

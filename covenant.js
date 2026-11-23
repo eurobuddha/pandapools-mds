@@ -76,17 +76,30 @@ var Covenant = (function () {
      * Quote a KISS script for a command param (runscript/newscript) WITHOUT escaping forward slashes.
      * The native app's Util.scriptArg exists because Java's JSONObject.quote escaped `/`→`\/`, which makes
      * the covenant's `*5/1000` unparseable (parseok=false) → a coin at that malformed address is UNSPENDABLE
-     * FOREVER. In JS we simply wrap in double-quotes, escaping only `"` and `\` (which KISS never contains) —
-     * and CRUCIALLY leave `/` alone. MDS.cmd passes the string through verbatim, so `/` survives.
+     * FOREVER. `/` is left alone; MDS.cmd passes the string through verbatim.
+     *
+     * REFUSED, never escaped (0.6.52): the node's parameter parser (CommandRunner.splitStringJSON / splitterQuotedPattern)
+     * honours NO backslash escape — a quoted value ends at the FIRST `"` and keeps any backslash — so an "escaped" `"`
+     * still closes the quote, the text after it becomes parameters of its own (the LAST duplicate `script:` wins) and
+     * the script arrives mangled. A script holding `"` or `\` (or `;` / a control character, which the runtime guard
+     * refuses anyway) returns null. No legitimate covenant holds either: its literals are poolParams-strict hex/decimal.
      */
+    var UNSAFE_SCRIPT = /["\\;\x00-\x1f\x7f]/;
+    var REFUSED = 'UNSAFE_SCRIPT: refused a covenant script holding a double quote, a backslash, ";" or a control character (the node would end the quoted value early and read the rest as parameters). Nothing was sent.';
     function scriptArg(s) {
-        var out = '"';
-        for (var i = 0; i < s.length; i++) {
-            var c = s.charAt(i);
-            if (c === '"' || c === '\\') out += '\\';
-            out += c;
+        if (typeof s !== 'string' || !s || UNSAFE_SCRIPT.test(s)) return null;
+        return '"' + s + '"';
+    }
+    /** MDS.cmd(head + ' script:"<script>"', cb), or — for a script scriptArg refuses — nothing sent: logged and
+     *  answered like a node refusal, so every caller's existing failure path runs. */
+    function scriptCmd(head, s, cb) {
+        var q = scriptArg(s);
+        if (q === null) {
+            try { MDS.log('SECURITY ' + REFUSED + ' ' + JSON.stringify(String(s))); } catch (e) {}
+            if (cb) cb({ status: false, pending: false, error: REFUSED });
+            return;
         }
-        return out + '"';
+        MDS.cmd(head + ' script:' + q, cb);
     }
 
     // The discovery depth bound used by book.js and service.js (both still write it inline as depth:1500).
@@ -102,6 +115,8 @@ var Covenant = (function () {
         script: script,
         kmin: kmin,
         sizeOk: sizeOk,
-        scriptArg: scriptArg
+        scriptArg: scriptArg,
+        scriptCmd: scriptCmd,
+        UNSAFE_SCRIPT: UNSAFE_SCRIPT
     };
 })();

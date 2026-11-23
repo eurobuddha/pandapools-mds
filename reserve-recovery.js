@@ -178,7 +178,9 @@ var ReserveRecovery = (function () {
     }
     function restoreOne(e,archive,cb){
         if(!validRecipe(e)){cb(false,"Invalid pool recipe; nothing imported.");return;}
-        call(local,"runscript script:"+Covenant.scriptArg(e.script),function(j){
+        var quoted=Covenant.scriptArg(e.script);
+        if(quoted===null){cb(false,e.addr+"\nCovenant script holds a quote, backslash, \";\" or control character; refused, nothing imported.");return;}
+        call(local,"runscript script:"+quoted,function(j){
             var r=j&&j.response;
             if(!r||!truth(r.parseok)||!r.script||key(r.script.address)!==key(e.addr)){cb(false,e.addr+"\nCovenant address did not verify.");return;}
             var p=pool(e);
@@ -191,7 +193,7 @@ var ReserveRecovery = (function () {
                 if(!saved){cb(false,e.addr+"\nCould not save the recipe and signing hold. Nothing imported.");return;}
                 if(integer(e.kidx,2048))PoolMgr.rememberKidx(e.opk,Number(e.kidx));
                 Store.knownAddrsAdd([e.addr,e.mx]);
-                call(local,"newscript trackall:true script:"+Covenant.scriptArg(e.script),function(tracked){
+                call(local,"newscript trackall:true script:"+quoted,function(tracked){
                     if(!tracked){cb(false,e.addr+"\nCould not track covenant; recipe retained.");return;}
                     savedHints(p,function(){recover(p,e,archive,function(ok,detail){if(!ok){cb(false,detail);return;}Store.ownRecord(p,function(persisted){cb(!!persisted,detail+(persisted?"":"\nCould not save verified reserve IDs."));});});});
                 });

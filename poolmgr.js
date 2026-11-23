@@ -377,7 +377,7 @@ var PoolMgr = (function () {
 
     // ---------------------------------------------------------------- address derivation (parseok pre-flight)
     function deriveAddress(script, ok, fail) {
-        MDS.cmd("runscript script:" + Covenant.scriptArg(script), function (j) {
+        Covenant.scriptCmd("runscript", script, function (j) {
             var resp = j ? j.response : null;
             var parseok = PP.truthy(resp && resp.parseok);
             var sc = resp ? resp.script : null;
@@ -392,7 +392,7 @@ var PoolMgr = (function () {
     // OWNER flows only (refresh/deposit/close — create/migrate register inline): the owner WANTS the pool
     // relevant, so trackall:true is correct — their reserves are their capital.
     function ensureTracked(p, then) {
-        MDS.cmd("newscript trackall:true script:" + Covenant.scriptArg(Covenant.script(p.opk, p.oadr, p.tok, p.kmin)), function () { then(); });
+        Covenant.scriptCmd("newscript trackall:true", Covenant.script(p.opk, p.oadr, p.tok, p.kmin), function () { then(); });
     }
     // SWAP path: make the covenant available for txnbasics WITHOUT adopting a stranger's reserves into this
     // wallet's balance. txnbasics reads the script table regardless of the track flag, so trackall:false swaps
@@ -411,7 +411,7 @@ var PoolMgr = (function () {
             if (!notFound) { then(); return; }   // ambiguous failure → no write (see above)
             var script = (p.covenantScript && p.covenantScript.length) ? p.covenantScript
                        : Covenant.script(p.opk, p.oadr, p.tok, p.kmin);
-            MDS.cmd("newscript trackall:false script:" + Covenant.scriptArg(script), function () { then(); });
+            Covenant.scriptCmd("newscript trackall:false", script, function () { then(); });
         });
     }
     function ensureTrackedAll(allocs, i, then) {
@@ -514,7 +514,7 @@ var PoolMgr = (function () {
             // 2. derive the canonical covenant address (+ parseok pre-flight)
             deriveAddress(script, function (address, mx) {
                 // 3. register so the node tracks + can later spend the pool coins
-                MDS.cmd("newscript trackall:true script:" + Covenant.scriptArg(script), function () {
+                Covenant.scriptCmd("newscript trackall:true", script, function () {
                     var p = {
                         address: address, mxaddress: mx, opk: opk, oadr: oadr, tok: tokenid,
                         kmin: kmin, tokDecimals: tokDecimals, reserveM: x0, reserveT: y0c, tokName: null,
@@ -624,7 +624,7 @@ var PoolMgr = (function () {
             if (a2.toLowerCase() === (p.address || "").toLowerCase()) {
                 done.fail("these reserves give the same pool — change the amounts, or use Add to grow in place"); return;
             }
-            MDS.cmd("newscript trackall:true script:" + Covenant.scriptArg(script2), function () {
+            Covenant.scriptCmd("newscript trackall:true", script2, function () {
                 var np = {
                     address: a2, mxaddress: mx2, opk: p.opk, oadr: p.oadr, tok: p.tok,
                     kmin: kmin2, tokDecimals: p.tokDecimals, reserveM: newX, reserveT: newYc, tokName: p.tokName,

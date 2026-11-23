@@ -118,7 +118,7 @@ var Book = (function () {
                 try { script = Covenant.script(p.opk, p.oadr, p.tok, p.kmin); }
                 catch (e) { oneDone(); return; }
             }
-            MDS.cmd("runscript script:" + Covenant.scriptArg(script), function (j) {
+            Covenant.scriptCmd("runscript", script, function (j) {
                 try {
                     var resp = j ? j.response : null;
                     // ONLY surface a covenant that actually compiles — a non-parsing script's coins are
