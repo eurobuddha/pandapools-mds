@@ -19,3 +19,11 @@ test('no engine or page source concatenates an ellipsis onto a cut identifier', 
     assert.ok(!/(substring|slice)\(\s*0\s*,\s*\d+\s*\)\)?\s*\+\s*["']…["']/.test(s), f + ' cuts a value and appends …');
   }
 });
+
+test('service.js names an unnamed token by its whole id, with no shortening helper left to "restore" (0.6.51)', () => {
+  const src = fs.readFileSync(path.join(base, 'service.js'), 'utf8');
+  assert.ok(!/function short\s*\(/.test(src) && !/\bshort\(/.test(src), 'service.js still has a short() helper');
+  const c = { MDS: { cmd() {}, sql() {}, log() {}, init() {} }, console }; vm.createContext(c);
+  vm.runInContext(['runtime-guard.js', 'decimal.js', 'covenant.js', 'curve.js', 'reserve-recovery.js', 'input-claims.js', 'service.js'].map(f => fs.readFileSync(path.join(base, f), 'utf8')).join('\n'), c);
+  assert.equal(c.labelOf(undefined, ID), ID); assert.equal(c.labelOf({ name: {} }, ID), ID); assert.equal(c.labelOf({ name: { name: 'MxUSD' } }, ID), 'MxUSD');
+});

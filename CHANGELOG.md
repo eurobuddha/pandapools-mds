@@ -1,3 +1,7 @@
+## 0.6.51
+
+- RULE 1 (review): the service's token-label fallback went through a helper named `short()`. Since 0.6.39 it already returned the whole id, but a helper of that name is one edit away from cutting identifiers again; it is gone and the fallback is the full token id itself. New case in `tests/rule1-ids.test.cjs` (fails on 0.6.50, which still had the helper).
+
 ## 0.6.50
 
 - A `txnpost` the node did not answer may have been broadcast. Host shims now answer a timeout or reset after sending with `{status:false, pending:true, error:"the node did not answer txnpost…"}`; the engine honours it as the input-claims rule says (an uncertain post stays held): the inputs stay claimed, the page says "<Swap|Create|Add|Migrate|Close> posted, outcome unknown: check Activity before retrying" (amber, not "failed: post rejected"), the service logs the same line, and nothing retries the spend. Chain reads settle it on later blocks: `PoolInputClaims.sweepUnposted` frees a claim whose coin is still unspent and out of the mempool after 10 minutes (never broadcast); a spent coin stays held. A refusal (status:false, not pending) still frees the inputs at once, as before.

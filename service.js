@@ -431,12 +431,11 @@ function fund(pools) {
 function labelOf(token, tid) {
     if (typeof token === "string") return token;
     if (token && typeof token === "object" && token.name) {
-        if (typeof token.name === "object") return token.name.ticker || token.name.name || short(tid);
+        if (typeof token.name === "object") return token.name.ticker || token.name.name || tid || "";
         if (typeof token.name === "string") return token.name;
     }
-    return short(tid);
+    return tid || "";   // RULE 1: an unnamed token is named by its WHOLE id (no shortening helper: it once cut 8 hex + …)
 }
-function short(s) { return s || ""; }   // RULE 1: an unnamed token is named by its WHOLE id (was the first 8 hex + …)
 function isFunded(p) { return p.reserveM && p.reserveT && decCmp(p.reserveM, "0") > 0 && decCmp(p.reserveT, "0") > 0; }
 
 function done(pools) {
@@ -824,7 +823,7 @@ function ingestFeed(pools) {
             var addr = p.address.toLowerCase();
             seen[addr] = true; seenCount++;
             var prevEnc = snap[addr];
-            var label = p.tokLabel || short(p.tok);
+            var label = p.tokLabel || p.tok || "";
             var firstSeen = !SESSION_SEEN[addr];
             SESSION_SEEN[addr] = true;
             snap[addr] = encSnap(p.reserveM, p.reserveT, label, 0);   // fresh reading, miss reset
