@@ -142,7 +142,7 @@
 <script src="combined-backup.js"></script>
 <script src="full-backup.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.49";
+var PANDAPOOLS_VERSION = "0.6.50";
 
 var App = (function () {
     var D = Decimal;
@@ -494,6 +494,11 @@ var App = (function () {
             "\n\nThis posts a real on-chain transaction — if a pool moves before it confirms the swap is rejected (you keep your funds).",
             "Swap", function () { doSwap(r, dir); });
     }
+    /** A post the node did not answer may have gone out: "Swap posted, outcome unknown: …", never "Swap failed". */
+    function failNote(id, verb, m) {
+        var unknown = String(m || "").indexOf(PoolMgr.POST_UNKNOWN) === 0;
+        setStatus(id, verb + (unknown ? " " : " failed: ") + m, unknown ? "warn" : "err");
+    }
     function doSwap(r, dir) {
         posting = true; busy = true;
         el("swapBtn").disabled = true; el("swapBtn").innerText = "SWAPPING…";
@@ -513,7 +518,7 @@ var App = (function () {
             fail: function (m) {
                 Store.actRecordFailed("SWAP", summary, m);
                 posting = false; busy = false;
-                setStatus("swapStatus", "Swap failed: " + m, "err");
+                failNote("swapStatus", "Swap", m);
                 el("swapBtn").disabled = false; el("swapBtn").innerText = "SWAP";
             }
         });
@@ -887,7 +892,7 @@ var App = (function () {
                 setStatus("lpStatus", "Submitted ✓ " + PP.shorten(txpowid) + " — your pool is confirming on-chain (usually 1–3 blocks). It will appear below automatically.", "ok");
                 rescan(true); doBackup();
             },
-            fail: function (m) { Store.actRecordFailed("CREATE", "Create MINIMA / " + t.name + " pool", m); busy = false; setStatus("lpStatus", "Create failed: " + m, "err"); }
+            fail: function (m) { Store.actRecordFailed("CREATE", "Create MINIMA / " + t.name + " pool", m); busy = false; failNote("lpStatus", "Create", m); }
         });
     }
 
@@ -926,7 +931,7 @@ var App = (function () {
                 Store.actRecord("DEPOSIT", "Add to MINIMA / " + tl + "  ·  " + trim(m) + " MINIMA + " + trim(t) + " " + tl, txpowid, CURRENT_BLOCK);
                 busy = false; setStatus("lpStatus", "Liquidity added ✓ " + PP.shorten(txpowid) + " — confirming on-chain.", "ok"); rescan(true);
             },
-            fail: function (msg) { Store.actRecordFailed("DEPOSIT", "Add to MINIMA / " + tl, msg); busy = false; setStatus("lpStatus", "Add failed: " + msg, "err"); }
+            fail: function (msg) { Store.actRecordFailed("DEPOSIT", "Add to MINIMA / " + tl, msg); busy = false; failNote("lpStatus", "Add", msg); }
         });
     }
 
@@ -987,7 +992,7 @@ var App = (function () {
                 Store.actRecord("MIGRATE", "Migrate MINIMA / " + tl + " pool  ·  new size " + trim(np.reserveM) + " MINIMA + " + trim(np.reserveT) + " " + tl, txpowid, CURRENT_BLOCK);
                 busy = false; setStatus("lpStatus", "Migrated ✓ " + PP.shorten(txpowid) + " — confirming on-chain.", "ok"); rescan(true); doBackup();
             },
-            fail: function (msg) { Store.actRecordFailed("MIGRATE", "Migrate MINIMA / " + tl + " pool", msg); busy = false; setStatus("lpStatus", "Migrate failed: " + msg, "err"); }
+            fail: function (msg) { Store.actRecordFailed("MIGRATE", "Migrate MINIMA / " + tl + " pool", msg); busy = false; failNote("lpStatus", "Migrate", msg); }
         });
         });
     }
@@ -1020,7 +1025,7 @@ var App = (function () {
                         rescan(true);
                         PoolMgr.collectSweep(function () { rescan(true); });   // first pass now; the service keeps at it
                     },
-                    fail: function (msg) { Store.actRecordFailed("CLOSE", summary, msg); busy = false; setStatus("lpStatus", "Close failed: " + msg, "err"); }
+                    fail: function (msg) { Store.actRecordFailed("CLOSE", summary, msg); busy = false; failNote("lpStatus", "Close", msg); }
                 });
                 });
             });

@@ -600,7 +600,10 @@ function checkPostSvc(txid, cmds, cb) {
                                 if(rp&&rp.status===false&&!rp.pending){PoolInputClaims.release(ids,txid,function(){finishSignSvc(cb,false,owner,heartbeat);});return;}
                                 // review 7 Nov (D-1, native 0.9.83): keep-fresh recreated the reserves — the saved hints follow them
                                 if(ok){ReserveRecovery.rememberPosted(rp,function(){finishSignSvc(cb,true,owner,heartbeat);});return;}
-                                finishSignSvc(cb,ok,owner,heartbeat);});
+                                // No answer or pending: it may have been broadcast. The inputs stay claimed until chain reads
+                                // settle it (PoolInputClaims.sweepUnposted on later blocks); this pass ends without retrying.
+                                MDS.log("PandaPools "+txid+": posted, outcome unknown: check Activity before retrying"+(rp&&rp.error?" ("+rp.error+")":""));
+                                finishSignSvc(cb,false,owner,heartbeat);});
                         });
                 });
             });
