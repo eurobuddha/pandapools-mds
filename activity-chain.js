@@ -97,6 +97,8 @@ var ActivityChain = (function () {
         row.statusText = statusText(row); return row;
     }
     function statusText(row) {
+        if (row.outcome === "unknown") return "Outcome unknown · waiting for the chain";
+        if (row.outcome === "notposted") return "Not posted · inputs free again";
         if (row.failed) return "Failed";
         if (row.verifiedAt && row.verifiedDepth >= 0) return row.verifiedDepth + (row.verifiedDepth === 1 ? " confirmation" : " confirmations") + " · on-chain";
         if (!hex(row.txpowid)) return "No transaction ID saved";
@@ -261,7 +263,39 @@ var ActivityChain = (function () {
         });
         function finish() { fetching = false; change(); }
     }
-    return { init: init, observe: observe, rememberSubmission: rememberSubmission, snapshot: snapshot, verify: verify,
+    /** Settle every 'unknown' post (a txnpost the node did not answer) from the chain. POSTED: a stored transaction
+     *  (wallet history or public pool history) spends ALL of the inputs it claimed — the row becomes an ordinary 'ok'
+     *  receipt carrying that transaction id, so confirmations follow as usual. NOT POSTED: none of its inputs is
+     *  claimed any more (PoolInputClaims.sweepUnposted released them: unspent and out of the mempool). Otherwise it
+     *  stays unknown. Posted is checked first. cb(types) = {SWAP:true, ...} of the posts still unknown, or null when
+     *  the activity table could not be read (callers must then keep the actions off). */
+    function settleUnknown(cb) {
+        Store.actUnknown(function (rows) {
+            if (!rows) { cb(null); return; }
+            if (!rows.length) { cb({}); return; }
+            read(function (data) {
+                var left = {};
+                if (!data) { rows.forEach(function (r) { left[r.type] = true; }); cb(left); return; }
+                var txs = allHistory(data);
+                function spends(h, ids) {
+                    var ins = parsed(h.inputs).map(function (c) { return key(c && c.coinid); });
+                    return ids.every(function (id) { return ins.indexOf(key(id)) >= 0; });
+                }
+                (function next(i) {
+                    if (i === rows.length) { cb(left); return; }
+                    var r = rows[i], ids = r.inputs;
+                    if (!ids.length) { left[r.type] = true; next(i + 1); return; }
+                    var hit = txs.filter(function (h) { return hex(h.txpowid) && spends(h, ids); })[0];
+                    if (hit) { Store.actSettle(r.id, "ok", key(hit.txpowid), function (ok) { if (!ok) left[r.type] = true; next(i + 1); }); return; }
+                    PoolInputClaims.heldIds(ids, function (held) {
+                        if (held && !held.length) { Store.actSettle(r.id, "notposted", "", function (ok) { if (!ok) left[r.type] = true; next(i + 1); }); return; }
+                        left[r.type] = true; next(i + 1);
+                    });
+                })(0);
+            });
+        });
+    }
+    return { init: init, observe: observe, rememberSubmission: rememberSubmission, snapshot: snapshot, verify: verify, settleUnknown: settleUnknown,
         syncPublic: syncPublic, status: status, statusText: statusText, timeline: timeline, poolEvents: poolEvents,
         readCommand: command, touches: touches, rowModel: rowModel, onChange: function (cb) { change = cb; }, visible: function (ids) { visible = ids || []; },
         stop: function () { stopped = true; change = function () {}; } };

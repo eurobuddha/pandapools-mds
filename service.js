@@ -613,7 +613,7 @@ function checkPostSvc(txid, cmds, cb) {
                                 if(ok){ReserveRecovery.rememberPosted(rp,function(){finishSignSvc(cb,true,owner,heartbeat);});return;}
                                 // No answer or pending: it may have been broadcast. The inputs stay claimed until chain reads
                                 // settle it (PoolInputClaims.sweepUnposted on later blocks); this pass ends without retrying.
-                                MDS.log("PandaPools "+txid+": posted, outcome unknown: check Activity before retrying"+(rp&&rp.error?" ("+rp.error+")":""));
+                                MDS.log("PandaPools "+txid+": posted, outcome unknown: check Activity before retrying"+(rp&&rp.error?" ("+rp.error+")":"")+" — claimed inputs "+ids.join(", ")+" stay held until the chain settles it");
                                 finishSignSvc(cb,false,owner,heartbeat);});
                         });
                 });

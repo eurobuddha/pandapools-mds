@@ -67,7 +67,7 @@ var PoolInputClaims = (function(){
                 var rows=r.rows,at=0,freed=0,live={};
                 function next(){
                     if(at>=rows.length){for(var k in firstSeen)if(!live[k])delete firstSeen[k];cb(freed);return;}
-                    var id=String(rows[at].COINID||rows[at].coinid||'').toLowerCase();at++;
+                    var id=String(rows[at].COINID||rows[at].coinid||'').toLowerCase(),handle=String(rows[at].HANDLE||rows[at].handle||'');at++;
                     if(!valid(id)){next();return;}
                     live[id]=true;
                     if(!firstSeen[id]){firstSeen[id]=nowMs;next();return;}
@@ -76,7 +76,8 @@ var PoolInputClaims = (function(){
                         var rs=c&&c.status===true&&!c.pending&&c.response,coin=Array.isArray(rs)&&rs.length===1?rs[0]:null;
                         if(!coin||String(coin.coinid).toLowerCase()!==id||coin.spent!==false){next();return;}
                         MDS.sql("DELETE FROM pp_posted_inputs WHERE coinid='"+id+"'",function(d){
-                            if(d&&d.status===true){delete held[id];delete owner[id];delete firstSeen[id];freed++;}
+                            if(d&&d.status===true){delete held[id];delete owner[id];delete firstSeen[id];freed++;
+                                try{MDS.log('PandaPools '+handle+': not posted — claimed input '+id+' is unspent and out of the mempool, released');}catch(e){}}
                             next();
                         });
                     });
@@ -85,5 +86,15 @@ var PoolInputClaims = (function(){
             });
         });
     }
-    return {load:load,check:check,post:post,release:release,blocked:blocked,sweepUnposted:sweepUnposted};
+    /* cb(the subset of ids still claimed in the table) — or cb(null) when the table cannot be read. */
+    function heldIds(ids,cb){
+        if(!ids.length||ids.some(function(id){return !valid(id);})){cb(null);return;}
+        table(function(ok){if(!ok){cb(null);return;}
+            MDS.sql('SELECT coinid FROM pp_posted_inputs WHERE coinid IN ('+ids.map(function(id){return "'"+id.toLowerCase()+"'";}).join(',')+')',function(r){
+                if(!r||r.status!==true||!Array.isArray(r.rows)){cb(null);return;}
+                cb(r.rows.map(function(x){return String(x.COINID||x.coinid||'').toLowerCase();}));
+            });
+        });
+    }
+    return {load:load,check:check,post:post,release:release,blocked:blocked,sweepUnposted:sweepUnposted,heldIds:heldIds};
 })();

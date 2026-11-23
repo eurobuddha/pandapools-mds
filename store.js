@@ -22,7 +22,7 @@ var Store = (function () {
     function init(cb) {
         // probe one table; only CREATE the set if missing (avoids pending prompts)
         MDS.sql("SELECT 1 FROM pp_activity LIMIT 1", function (r) {
-            function fin() { migrateFeedKind(function () { migrateActivityRefaddr(function () { ensureOwnPools(function () { ensureRecoveryColumns(function () { ensureHistory(function () { ensurePendingCollect(function () { ready = true; if (cb) cb(); }); }); }); }); }); }); }
+            function fin() { migrateFeedKind(function () { migrateActivityRefaddr(function () { migrateActivityInputs(function () { ensureOwnPools(function () { ensureRecoveryColumns(function () { ensureHistory(function () { ensurePendingCollect(function () { ready = true; if (cb) cb(); }); }); }); }); }); }); }); }
             if (r && r.status) { fin(); return; }
             create(fin);
         });
@@ -33,6 +33,13 @@ var Store = (function () {
         MDS.sql("SELECT refaddr FROM pp_activity LIMIT 1", function (r) {
             if (r && r.status) { cb(); return; }
             MDS.sql("ALTER TABLE pp_activity ADD COLUMN refaddr varchar(80)", function () { cb(); });
+        });
+    }
+    // 0.6.53: `inputs` = the full coin ids an "outcome unknown" post claimed (comma-separated), so the chain can settle it.
+    function migrateActivityInputs(cb) {
+        MDS.sql("SELECT inputs FROM pp_activity LIMIT 1", function (r) {
+            if (r && r.status) { cb(); return; }
+            MDS.sql("ALTER TABLE pp_activity ADD COLUMN inputs varchar(8000)", function () { cb(); });
         });
     }
     // Ensure pp_ownpools exists for a pre-0.3.0 install (created before this table existed). Probe first so a
@@ -161,9 +168,10 @@ var Store = (function () {
                 " `summary` varchar(400) NOT NULL," +
                 " `txpowid` varchar(80)," +
                 " `submitblock` int NOT NULL," +
-                " `status` varchar(12) NOT NULL," +      // 'ok' | 'confirmed' | 'failed'
+                " `status` varchar(12) NOT NULL," +      // 'ok' | 'confirmed' | 'failed' | 'unknown' | 'notposted'
                 " `failmsg` varchar(400)," +
                 " `refaddr` varchar(80)," +              // a CREATE's covenant address (verified via its reserves)
+                " `inputs` varchar(8000)," +             // an 'unknown' post's claimed input coin ids, in full
                 " `ts` bigint NOT NULL)", function () {
                 MDS.sql(
                     "CREATE TABLE IF NOT EXISTS `pp_feed` (" +
@@ -249,6 +257,34 @@ var Store = (function () {
         MDS.sql("INSERT INTO pp_activity (type, summary, txpowid, submitblock, status, failmsg, ts) VALUES ('" +
             esc(type) + "','" + esc(summary) + "','',0,'failed','" + esc(failMsg || "") + "', " + Date.now() + ")", function () {});
     }
+    /** A failed operation. A post the node did not answer (info.unknown, from PoolMgr's finalize) MAY have gone
+     *  out: it is recorded as status 'unknown' with the input coin ids it claimed, never as 'failed' — the chain
+     *  settles it later (ActivityChain.settleUnknown). Anything else is a plain failure. cb() after the write. */
+    function actRecordFail(type, summary, failMsg, info, cb) {
+        cb = cb || function () {};
+        if (!info || !info.unknown) { actRecordFailed(type, summary, failMsg); cb(); return; }
+        if (!ready) { cb(); return; }
+        var ids = (info.inputs || []).filter(function (id) { return /^0x[0-9a-fA-F]{64}$/.test(String(id)); }).map(function (id) { return String(id).toLowerCase(); });
+        MDS.sql("INSERT INTO pp_activity (type, summary, txpowid, submitblock, status, failmsg, inputs, ts) VALUES ('" +
+            esc(type) + "','" + esc(summary) + "','',0,'unknown','" + esc(failMsg || "") + "','" + ids.join(",") + "', " + Date.now() + ")", function () { cb(); });
+    }
+    /** cb(rows) — the still-unsettled 'unknown' posts: {id, type, summary, inputs:[full ids], ts}. cb(null) on a read error. */
+    function actUnknown(cb) {
+        if (!ready) { cb(null); return; }
+        MDS.sql("SELECT id, type, summary, inputs, ts FROM pp_activity WHERE status='unknown' ORDER BY id ASC", function (r) {
+            if (!r || !r.status || !Array.isArray(r.rows)) { cb(null); return; }
+            cb(r.rows.map(function (row) { return { id: Number(row.ID), type: row.TYPE, summary: row.SUMMARY,
+                inputs: String(row.INPUTS || "").split(",").filter(function (x) { return x; }), ts: parseInt(row.TS) || 0 }; }));
+        });
+    }
+    /** Settle one 'unknown' row: 'ok' + the transaction that spent its inputs (posted), or 'notposted'. Only an
+     *  'unknown' row moves. cb(ok). */
+    function actSettle(id, status, txpowid, cb) {
+        if (!ready || (status !== "ok" && status !== "notposted")) { cb(false); return; }
+        MDS.sql("UPDATE pp_activity SET status='" + status + "', txpowid='" + esc(txpowid || "") + "'" +
+            (status === "notposted" ? ", failmsg='Not posted: the chain never saw it, and its inputs are free again'" : ", failmsg=''") +
+            " WHERE id=" + (parseInt(id) || 0) + " AND status='unknown'", function (r) { cb(!!(r && r.status)); });
+    }
     /** cb(entries[]) newest first. Each: {type,summary,txpowid,submitBlock,ts,failed,failMsg}. */
     function actList(limit, cb) {
         if (!ready) { cb([], false); return; }
@@ -258,7 +294,9 @@ var Store = (function () {
                 out.push({
                     type: row.TYPE, summary: row.SUMMARY,
                     txpowid: row.TXPOWID || "", submitBlock: parseInt(row.SUBMITBLOCK) || 0,
-                    ts: parseInt(row.TS) || 0, failed: row.STATUS === "failed", failMsg: row.FAILMSG || "",
+                    ts: parseInt(row.TS) || 0, failed: row.STATUS === "failed" || row.STATUS === "notposted", failMsg: row.FAILMSG || "",
+                    outcome: row.STATUS === "unknown" || row.STATUS === "notposted" ? row.STATUS : "",
+                    inputs: String(row.INPUTS || "").split(",").filter(function (x) { return x; }),
                     refaddr: row.REFADDR || "",                    // a CREATE's covenant address, for reserve verification
                     confirmedOnchain: row.STATUS === "confirmed"   // verified: pool reserves landed on-chain
                 });
@@ -509,7 +547,8 @@ var Store = (function () {
         combinedBackupReady: combinedBackupReady, recordCombinedBackup: recordCombinedBackup,
         init: init, isReady: function () { return ready; },
         lpRecord: lpRecord, lpUpdateFeeBase: lpUpdateFeeBase, lpRemove: lpRemove, lpGet: lpGet,
-        actRecord: actRecord, actRecordFailed: actRecordFailed, actList: actList, actSetStatus: actSetStatus,
+        actRecord: actRecord, actRecordFailed: actRecordFailed, actRecordFail: actRecordFail, actUnknown: actUnknown, actSettle: actSettle,
+        actList: actList, actSetStatus: actSetStatus,
         confirmed: confirmed, statusText: statusText, CONFIRM_BLOCKS: CONFIRM_BLOCKS,
         feedList: feedList, knownAddrsGet: knownAddrsGet, knownAddrsAdd: knownAddrsAdd,
         confirmationFailed: confirmationFailed, ownRecord: ownRecord, ownAll: ownAll, setRetired: setRetired,

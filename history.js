@@ -156,6 +156,7 @@ var History = (function () {
             var tid = c.tokenid || "0x00";
             // keep BOTH address forms — the known-address set holds 0x and Mx, and either may be absent
             out.push({
+                coinid: c.coinid || "",   // 0.6.53: lets an "outcome unknown" post be matched to the transaction that spent its inputs
                 addr: c.miniaddress || c.address || "",
                 address: c.address || "",
                 miniaddress: c.miniaddress || "",

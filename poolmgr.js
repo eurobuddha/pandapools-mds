@@ -118,7 +118,7 @@ var PoolMgr = (function () {
         }
         return {
             ok: function (txpowid) { free(function () { done.ok(txpowid); }); },
-            fail: function (msg) { free(function () { done.fail(msg); }); }
+            fail: function (msg, info) { free(function () { done.fail(msg, info); }); }
         };
     }
 
@@ -248,7 +248,7 @@ var PoolMgr = (function () {
                         /* No answer, or pending (a host that timed out or lost the connection after sending says pending:true):
                          * it may have been broadcast. The inputs stay claimed; chain reads settle it on later blocks
                          * (PoolInputClaims.sweepUnposted frees a claim whose coin is still unspent and out of the mempool). */
-                        else done.fail(POST_UNKNOWN + errOf(rp)); }
+                        else done.fail(POST_UNKNOWN + errOf(rp), { unknown: true, txid: txid, inputs: inputs.slice() }); }
                 });
                 }); }
                 if(done.beforePost) done.beforePost(txid,broadcast,done.fail); else broadcast();
@@ -707,9 +707,9 @@ var PoolMgr = (function () {
                     cmds.push("txnoutput id:" + txid + " amount:" + PP.amt(PP.dec(p.reserveM)) + " address:" + p.oadr + " storestate:false");
                     cmds.push("txnoutput id:" + txid + " amount:" + PP.amt(PP.dec(p.reserveT)) + " address:" + p.oadr + tokArg + " storestate:false");
                     // no wallet funding inputs → only the owner signature is needed
-                    buildAndPost(txid, cmds, [p.opk], { recovery:done.recovery, beforePost: done.beforePost, ok: done.ok, fail: function (message) {
+                    buildAndPost(txid, cmds, [p.opk], { recovery:done.recovery, beforePost: done.beforePost, ok: done.ok, fail: function (message, info) {
                         if (!done.noRetry && !retried && message && message.indexOf("already spent") >= 0) { retried = true; attempt(); return; }
-                        done.fail(message);
+                        done.fail(message, info);
                     } });
                 }, done.fail);
             }

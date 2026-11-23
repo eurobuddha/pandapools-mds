@@ -142,7 +142,7 @@
 <script src="combined-backup.js"></script>
 <script src="full-backup.js"></script>
 <script>
-var PANDAPOOLS_VERSION = "0.6.52";
+var PANDAPOOLS_VERSION = "0.6.53";
 
 var App = (function () {
     var D = Decimal;
@@ -215,6 +215,7 @@ var App = (function () {
             refreshMarket();
             rescan(false);
             verifyPendingActivity();  // flip Activity to Confirmed only once the tx's effect is on-chain
+            settleUnknownOps();       // an "outcome unknown" post: posted or not, from the chain
         }
         if (msg.event === "NEWBALANCE") { refreshBalance(); rescan(false); }
     });
@@ -231,7 +232,7 @@ var App = (function () {
                 renderSwapRecent();
                 if (activeView === "activity") { if (showGlobal) renderGlobal(); else renderMyActivity(); }
             });
-            ActivityChain.init(function () { ActivityChain.verify(); syncHistory(); });
+            ActivityChain.init(function () { ActivityChain.verify(); syncHistory(); settleUnknownOps(); });
             setInterval(function () {
                 if (document.hidden) return;
                 ActivityChain.verify();
@@ -469,7 +470,7 @@ var App = (function () {
         html += kvRow("Pool fee (0.50%)", "kept by LPs");
         html += kvRow("You receive", "≈ " + trim6(r.totalOut) + " " + (minimaToToken ? pairLabel : "MINIMA"), "green");
         q.innerHTML = html;
-        el("swapBtn").disabled = posting;
+        el("swapBtn").disabled = posting || !!UNKNOWN_OPS.SWAP;
         el("swapBtn").innerText = posting ? "SWAPPING…" : "SWAP";
     }
     function impact(r) {
@@ -477,7 +478,7 @@ var App = (function () {
         return r.effPrice.minus(r.spotBefore).abs().div(r.spotBefore).times(100).toDP(2, D.ROUND_HALF_UP).toString();
     }
     function confirmSwap() {
-        if (!pairPools.length || posting) return;
+        if (!pairPools.length || posting || heldBack("SWAP", "swapStatus")) return;
         var inDec = parseDec(el("swapAmount").value);
         if (!inDec || inDec.lte(0)) { setStatus("swapStatus", "Enter an amount first.", "warn"); return; }
         var dir = minimaToToken;
@@ -493,6 +494,31 @@ var App = (function () {
             "\n\nPrice impact " + impact(r) + "%." + routed +
             "\n\nThis posts a real on-chain transaction — if a pool moves before it confirms the swap is rejected (you keep your funds).",
             "Swap", function () { doSwap(r, dir); });
+    }
+    // An "outcome unknown" post (the node did not answer txnpost) of a kind keeps THAT action off in this page until the
+    // chain settles it (ActivityChain.settleUnknown): a retry would spend new coins while the first may already have gone.
+    // Also off while the activity table cannot be read (null): unknown is not "none".
+    var UNKNOWN_OPS = {}, UNKNOWN_READ = false, OP_NAMES = { SWAP: "swap", CREATE: "pool creation", DEPOSIT: "add", MIGRATE: "migration", CLOSE: "withdrawal" };
+    function heldBack(type, statusId) {
+        if (UNKNOWN_READ && !UNKNOWN_OPS[type]) return false;
+        setStatus(statusId, UNKNOWN_READ
+            ? "Your last " + OP_NAMES[type] + " may have gone through: the node did not answer when it was posted. Check Activity. This stays off until the chain settles it (usually a few blocks)."
+            : "Checking whether an earlier post went through. Try again in a moment.", "warn");
+        return true;
+    }
+    function settleUnknownOps() {
+        function settle() {
+            ActivityChain.settleUnknown(function (left) {
+                UNKNOWN_READ = !!left; UNKNOWN_OPS = left || {};
+                if (!posting) requote();
+                if (activeView === "activity" && !showGlobal) renderMyActivity();
+                renderSwapRecent();
+            });
+        }
+        // the wallet history is where a posted transaction shows up; sync it first only when there is something to settle
+        if (UNKNOWN_READ && !Object.keys(UNKNOWN_OPS).length) { settle(); return; }
+        if (History.isRunning()) { settle(); return; }
+        History.sync(function () { settle(); });
     }
     /** A post the node did not answer may have gone out: "Swap posted, outcome unknown: …", never "Swap failed". */
     function failNote(id, verb, m) {
@@ -515,8 +541,8 @@ var App = (function () {
                 el("swapBtn").disabled = false; el("swapBtn").innerText = "SWAP";
                 rescan(true); doBackup();
             },
-            fail: function (m) {
-                Store.actRecordFailed("SWAP", summary, m);
+            fail: function (m, info) {
+                Store.actRecordFail("SWAP", summary, m, info, settleUnknownOps);
                 posting = false; busy = false;
                 failNote("swapStatus", "Swap", m);
                 el("swapBtn").disabled = false; el("swapBtn").innerText = "SWAP";
@@ -879,6 +905,7 @@ var App = (function () {
         openConfirm("Create this pool?", msg, "Create", function () { doCreate(t, minima, usdt); });
     }
     function doCreate(t, x, y) {
+        if (heldBack("CREATE", "lpStatus")) return;
         busy = true; setStatus("lpStatus", "Creating your MINIMA / " + t.name + " pool…", "dim");
         PoolMgr.createPool(t.tokenid, t.decimals, x, y, {
             created: function (pool, txpowid) {
@@ -892,7 +919,7 @@ var App = (function () {
                 setStatus("lpStatus", "Submitted ✓ " + PP.shorten(txpowid) + " — your pool is confirming on-chain (usually 1–3 blocks). It will appear below automatically.", "ok");
                 rescan(true); doBackup();
             },
-            fail: function (m) { Store.actRecordFailed("CREATE", "Create MINIMA / " + t.name + " pool", m); busy = false; failNote("lpStatus", "Create", m); }
+            fail: function (m, info) { Store.actRecordFail("CREATE", "Create MINIMA / " + t.name + " pool", m, info, settleUnknownOps); busy = false; failNote("lpStatus", "Create", m); }
         });
     }
 
@@ -923,6 +950,7 @@ var App = (function () {
         ]);
     }
     function doDeposit(p, m, t) {
+        if (heldBack("DEPOSIT", "lpStatus")) return;
         busy = true; setStatus("lpStatus", "Adding liquidity…", "dim");
         var tl = PP.tokenLabel(p);
         PoolMgr.deposit(p, m, t, {
@@ -931,7 +959,7 @@ var App = (function () {
                 Store.actRecord("DEPOSIT", "Add to MINIMA / " + tl + "  ·  " + trim(m) + " MINIMA + " + trim(t) + " " + tl, txpowid, CURRENT_BLOCK);
                 busy = false; setStatus("lpStatus", "Liquidity added ✓ " + PP.shorten(txpowid) + " — confirming on-chain.", "ok"); rescan(true);
             },
-            fail: function (msg) { Store.actRecordFailed("DEPOSIT", "Add to MINIMA / " + tl, msg); busy = false; failNote("lpStatus", "Add", msg); }
+            fail: function (msg, info) { Store.actRecordFail("DEPOSIT", "Add to MINIMA / " + tl, msg, info, settleUnknownOps); busy = false; failNote("lpStatus", "Add", msg); }
         });
     }
 
@@ -973,6 +1001,7 @@ var App = (function () {
     }
 
     function doMigrate(p, x, y) {
+        if (heldBack("MIGRATE", "lpStatus")) return;
         busy = true; setStatus("lpStatus", "Migrating your pool…", "dim");
         var tl = PP.tokenLabel(p);
         // Self-heal the owner key before the owner-signed migrate (see confirmClose) — no-op if already held.
@@ -992,7 +1021,7 @@ var App = (function () {
                 Store.actRecord("MIGRATE", "Migrate MINIMA / " + tl + " pool  ·  new size " + trim(np.reserveM) + " MINIMA + " + trim(np.reserveT) + " " + tl, txpowid, CURRENT_BLOCK);
                 busy = false; setStatus("lpStatus", "Migrated ✓ " + PP.shorten(txpowid) + " — confirming on-chain.", "ok"); rescan(true); doBackup();
             },
-            fail: function (msg) { Store.actRecordFailed("MIGRATE", "Migrate MINIMA / " + tl + " pool", msg); busy = false; failNote("lpStatus", "Migrate", msg); }
+            fail: function (msg, info) { Store.actRecordFail("MIGRATE", "Migrate MINIMA / " + tl + " pool", msg, info, settleUnknownOps); busy = false; failNote("lpStatus", "Migrate", msg); }
         });
         });
     }
@@ -1004,6 +1033,7 @@ var App = (function () {
         openConfirm("Withdraw all liquidity?",
             "This closes the MINIMA / " + tl + " pool and sweeps " + trim(p.reserveM) + " MINIMA + " + trim(p.reserveT) + " " + tl + " (including earned fees) back to your wallet.",
             "Withdraw", function () {
+                if (heldBack("CLOSE", "lpStatus")) return;
                 busy = true; setStatus("lpStatus", "Closing pool…", "dim");
                 var summary = "Withdraw MINIMA / " + tl + "  ·  " + trim(p.reserveM) + " MINIMA + " + trim(p.reserveT) + " " + tl + " back to wallet";
                 var closeOadr = p.oadr;
@@ -1025,7 +1055,7 @@ var App = (function () {
                         rescan(true);
                         PoolMgr.collectSweep(function () { rescan(true); });   // first pass now; the service keeps at it
                     },
-                    fail: function (msg) { Store.actRecordFailed("CLOSE", summary, msg); busy = false; failNote("lpStatus", "Close", msg); }
+                    fail: function (msg, info) { Store.actRecordFail("CLOSE", summary, msg, info, settleUnknownOps); busy = false; failNote("lpStatus", "Close", msg); }
                 });
                 });
             });
@@ -1357,7 +1387,9 @@ var App = (function () {
         var meta = (e.txpowid ? txidChip(e.txpowid) + " · " : "") + esc(e.timeLabel + " " + transactionDate(e.ts));
         if (e.originalTxpowid && e.originalTxpowid.toLowerCase() !== String(e.txpowid).toLowerCase()) meta += '<br>Original submission ' + txidChip(e.originalTxpowid);
         if (e.verifiedAt) meta += '<br>Checked ' + esc(transactionDate(e.verifiedAt));
-        if (e.failed && e.failMsg) meta += '<br>' + esc(e.failMsg);
+        if ((e.failed || e.outcome === "unknown") && e.failMsg) meta += '<br>' + esc(e.failMsg);
+        // an unsettled post names every input it claimed, in full: they are what the chain settles it by
+        if (e.outcome === "unknown" && e.inputs && e.inputs.length) meta += '<br>Claimed inputs:<br>' + e.inputs.map(function (id) { return '<span style="font-family:var(--mono);overflow-wrap:anywhere;user-select:text">' + esc(id) + '</span>'; }).join('<br>');
         return '<div class="card"><div class="kv"><span class="kv__k">' + esc(prettyType(e.type)) + '</span><span class="statuschip statuschip--' + cls + '">' + esc(Store.statusText(e)) + '</span></div>' +
             '<div class="row__l1">' + esc(e.summary) + '</div><div class="row__l2">' + meta + '</div></div>';
     }
