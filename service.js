@@ -457,7 +457,9 @@ function done(pools) {
     // page-side loop gave up after 8 tries 20 s apart and died with the tab, against coins that are not even
     // spendable until 3 blocks after the close confirms. Success is the address being EMPTY, read back — never
     // a forward reporting that it posted. See PoolMgr.collectDecide.
-    if (PoolMgr && PoolMgr.collectSweep) PoolMgr.collectSweep(function () {});
+    // PoolMgr (poolmgr.js) and Store (store.js) exist where the host loads the whole engine (desktop); the MDS service
+    // bundle (build.sh) holds neither, and the bare name threw a ReferenceError that ended every headless scan here.
+    if (typeof PoolMgr !== "undefined" && PoolMgr && PoolMgr.collectSweep) PoolMgr.collectSweep(function () {});
 }
 
 // ---------------------------------------------------------------- Layer 5: background faded-beacon re-announce
@@ -690,6 +692,9 @@ function fillReservesSvc(pool,j){
  *  the background service, not a screen. A quarantined pool is told to Withdraw, not Re-publish: keep-fresh
  *  refuses to sign for it, so Re-publish is a button that cannot work. */
 function strandWatchSvc(p, age, held) {
+    // Needs PoolMgr + Store (see done()); without them the old bare call threw inside the keep-fresh read, so on MDS no
+    // reserve was ever refreshed headlessly. The stranding notice itself stays desktop-only (as it always was in fact).
+    if (typeof PoolMgr === "undefined" || !PoolMgr || typeof Store === "undefined" || !Store) return;
     var level = PoolMgr.strandLevel(age);
     if (!level) return;                                   // healthy, or age unknown — never escalate on unknown
     var k = "strand_" + p.address.toLowerCase();

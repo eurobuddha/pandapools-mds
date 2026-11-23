@@ -1,3 +1,8 @@
+## 0.6.49
+
+- The headless MDS service ended every scan in a ReferenceError: `done()` named `PoolMgr`, and the stranding watch `PoolMgr` and `Store`, none of which the service bundle holds (build.sh concatenates runtime-guard, decimal, covenant, curve, reserve-recovery, input-claims and service only). The keep-fresh pass died inside its own-pool read, so on MDS no own pool's reserves were ever recreated by the service (since 0.6.26). Both names are now checked before use: the collect sweep and the stranding notice run where the host loads the whole engine (desktop), and are skipped in the MDS bundle. New `tests/service-bundle.test.cjs` builds the bundle from build.sh's own file list and runs a scan with an own pool to its end (fails on 0.6.48 with "PoolMgr is not defined"); the injection test no longer hides the bug with a `PoolMgr: null` stub.
+- Consequence to know: with the keep-fresh pass working again, the MDS service now recreates an own pool's aging reserves while the page is closed (as designed and as desktop and native already do).
+
 ## 0.6.48
 
 - SECURITY (review of 0.6.46): `PoolRuntimeGuard.poolParams` now refuses an all-zero tokenid of any length (0.6.46 refused only the short "0x00"; the 64-zero form passed, though the comment said "never 0x00") and a KMIN at or above 2^64-1, the bound `ReserveRecovery.validRecipe` and `Covenant.sizeOk` already apply (compared as text, no number parsing). New cases in `tests/command-injection.test.cjs` (fail on 0.6.47).

@@ -40,7 +40,7 @@ test('book.js scan: poisoned sentinel beacons are skipped, nothing is sent, the 
   check(n); assert(n.texts.some(t => t.startsWith('runscript') && t.includes(hex(3))));
 });
 test('headless service scan (the packaged bundle): poisoned beacons skipped, nothing sent', () => {
-  const n = node(), c = context(n, ['runtime-guard.js', 'decimal.js', 'covenant.js', 'curve.js', 'reserve-recovery.js', 'input-claims.js', 'service.js'], { PoolMgr: null });   // the MDS bundle has no poolmgr.js (service.js done() tests PoolMgr)
+  const n = node(), c = context(n, ['runtime-guard.js', 'decimal.js', 'covenant.js', 'curve.js', 'reserve-recovery.js', 'input-claims.js', 'service.js']);   // the MDS bundle: no poolmgr.js, no store.js
   c.scan(); check(n);
 });
 test('the choke point: any command holding ";" or a control character (tab included) is refused, logged and never sent', () => {
