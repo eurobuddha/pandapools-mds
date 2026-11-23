@@ -61,6 +61,11 @@ test('pool parameters: strict 32-byte hex and a plain positive decimal', () => {
   const c = context(node(), ['runtime-guard.js']), P = c.PoolRuntimeGuard.poolParams;
   assert(P(hex(1), hex(2), hex(3), '50')); assert(P(hex(1).toLowerCase(), hex(2), hex(3), '0.125'));
   for (const bad of [[hex(1) + ';', hex(2), hex(3), '50'], ['0x01', hex(2), hex(3), '50'], [hex(1), hex(2), '0x00', '50'], [hex(1), hex(2), hex(3), '0'],
-    [hex(1), hex(2), hex(3), '5e3'], [hex(1), hex(2), hex(3), '1'.repeat(81)], [hex(1), 'Mx' + 'A'.repeat(60), hex(3), '50'], [{}, hex(2), hex(3), '50'], [hex(1), hex(2), hex(3), '-1']])
+    [hex(1), hex(2), hex(3), '5e3'], [hex(1), hex(2), hex(3), '1'.repeat(81)], [hex(1), 'Mx' + 'A'.repeat(60), hex(3), '50'], [{}, hex(2), hex(3), '50'], [hex(1), hex(2), hex(3), '-1'],
+    // 0.6.48: the all-zero (MINIMA) token at full length, and KMIN at or above 2^64-1 (validRecipe's bound)
+    [hex(1), hex(2), hex(0), '50'], [hex(1), hex(2), hex(3), '18446744073709551615'], [hex(1), hex(2), hex(3), '18446744073709551615.5'],
+    [hex(1), hex(2), hex(3), '99999999999999999999'], [hex(1), hex(2), hex(3), '1' + '0'.repeat(40)]])
     assert.equal(P(...bad), false, JSON.stringify(bad));
+  for (const ok of ['18446744073709551614.999', '0018446744073709551614', '0.000000001', hex(1).slice(2).replace(/^0+/, '')])
+    assert(P(hex(1), hex(2), hex(3), ok), ok);
 });
